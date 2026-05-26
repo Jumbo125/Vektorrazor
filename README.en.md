@@ -20,11 +20,12 @@
   <img src="https://img.shields.io/badge/License-GPLv3-blue" alt="License">
   <img src="https://img.shields.io/badge/Status-Prototype%20%2F%20CAD%20Workflow-yellow" alt="Status">
 </p>
+
 <p align="center"><strong>Copyright (C) 2026 Andreas Rottmann</strong></p>
 
 ## Overview
 
-**Vektorrazor** is a Python/Tkinter tool that turns prepared PNG logos into more CAD-oriented vector contours.
+**Vektorrazor** is a desktop tool that turns prepared PNG logos into more CAD-oriented vector contours.
 
 The workflow is intentionally split into two steps:
 
@@ -33,130 +34,100 @@ The workflow is intentionally split into two steps:
 2. Vectorize / inspect contours / export DXF or SVG
 ```
 
-## Very short quick guide
+## Quick start with a ready-to-use file
 
-### Windows
+### Windows amd64
 
-1. Start with `python main.py`.
-2. Load your PNG in **Step 1**.
-3. Reduce colors or create exact technical contrast colors.
-4. Click **Continue to vectorization**.
-5. In **Step 2**, click **Detect / Preview**.
-6. Remove unwanted paths in selection mode if needed.
-7. Select a DXF compatibility profile, for example **Illustrator/CorelDRAW recommended**.
-8. Click **Export DXF / SVG**.
+1. Download the Windows release asset from **GitHub Releases**:
 
-### Linux / WSL Ubuntu
-
-1. Install system packages:
-
-```bash
-sudo apt update
-sudo apt install python3-tk python3-venv python3-pip
+```text
+Vektorrazor-Windows-amd64-YYYY-MM-DD.zip
 ```
 
-2. Create a virtual environment:
+2. Extract the ZIP file.
+3. Start `Vektorrazor.exe`.
+4. If Windows SmartScreen warns you: click **More info → Run anyway**.
+5. In the program:
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
+```text
+load PNG → continue to vectorization → detect / preview → export DXF / SVG
 ```
 
-3. Install Python dependencies:
+### Linux amd64
+
+1. Download the Linux release asset from **GitHub Releases**:
+
+```text
+Vektorrazor-Linux-amd64-YYYY-MM-DD.tar.gz
+```
+
+2. Extract the archive:
 
 ```bash
-pip install -r requirements.txt
+tar -xzf Vektorrazor-Linux-amd64-YYYY-MM-DD.tar.gz
+cd Vektorrazor-Linux-amd64-YYYY-MM-DD
+```
+
+3. Make the binary executable:
+
+```bash
+chmod +x Vektorrazor
 ```
 
 4. Start the program:
 
 ```bash
-python main.py
+./Vektorrazor
 ```
 
-5. Use the workflow:
-
-```text
-load PNG → continue to vectorization → detect / preview → export
-```
-
-Note: A graphical environment is required for Tkinter. On Windows 11, WSLg usually handles this. Older WSL setups may require an X server.
+Note: Linux requires a graphical desktop environment. On Windows 11, WSL usually works through WSLg. Older WSL setups may require an X server.
 
 ## Installation
 
+Normal users do not need a Python installation. Ready-to-use release files are provided:
+
+| System | File | Action |
+|---|---|---|
+| Windows amd64 | `Vektorrazor-Windows-amd64-YYYY-MM-DD.zip` | extract and start `Vektorrazor.exe` |
+| Linux amd64 | `Vektorrazor-Linux-amd64-YYYY-MM-DD.tar.gz` | extract, make executable and run |
+
 ### Windows
 
+```text
+download ZIP → extract → start Vektorrazor.exe
+```
+
+### Linux
+
+```bash
+tar -xzf Vektorrazor-Linux-amd64-YYYY-MM-DD.tar.gz
+cd Vektorrazor-Linux-amd64-YYYY-MM-DD
+chmod +x Vektorrazor
+./Vektorrazor
+```
+
+## Developer notes
+
+The source code is still included in the repository. Developers can run from source or create custom builds with Python and PyInstaller.
+
+### Run from source
+
 ```bash
 pip install -r requirements.txt
 python main.py
 ```
 
-### Linux / Ubuntu / WSL
-
-```bash
-sudo apt update
-sudo apt install python3-tk python3-venv python3-pip
-
-python3 -m venv .venv
-source .venv/bin/activate
-
-pip install -r requirements.txt
-python main.py
-```
-
-## Build a Windows EXE
+### Build a Windows EXE manually
 
 ```bat
 pyinstaller --onefile --windowed --clean --name Vektorrazor --icon assets\vektorrazor.ico --version-file version_info.txt --add-data "assets\vektorrazor.ico;assets" --add-data "assets\vektorrazor_icon.png;assets" main.py
 ```
 
-Or run:
-
-```bat
-build_windows.bat
-```
-
-The icon is stored here:
-
-```text
-assets/vektorrazor.ico
-```
-
-It is embedded into the EXE via `--icon` and also bundled via `--add-data` so it can be used as the Tkinter window icon.
-
-## Build a Linux amd64 binary
-
-On Linux / WSL Ubuntu:
+### Build a Linux amd64 binary manually
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-
-pip install -r requirements.txt
-pip install pyinstaller
-
-pyinstaller --onefile --windowed --clean \
-  --name Vektorrazor \
-  --add-data "assets/vektorrazor.ico:assets" \
-  --add-data "assets/vektorrazor_icon.png:assets" \
-  main.py
+pyinstaller --onefile --windowed --clean   --name Vektorrazor   --add-data "assets/vektorrazor.ico:assets"   --add-data "assets/vektorrazor_icon.png:assets"   main.py
 ```
-
-The result will be:
-
-```text
-dist/Vektorrazor
-```
-
-Run it with:
-
-```bash
-chmod +x dist/Vektorrazor
-./dist/Vektorrazor
-```
-
-Important: On Linux, PyInstaller uses a colon `:` for `--add-data`.  
-On Windows, PyInstaller uses a semicolon `;`.
 
 ## Create release packages
 
@@ -180,12 +151,6 @@ This creates for example:
 release/Vektorrazor-Windows-amd64-2026-05-26.zip
 release/Vektorrazor-Linux-amd64-2026-05-26.tar.gz
 release/SHA256SUMS-2026-05-26.txt
-```
-
-To force a fixed release date:
-
-```bash
-RELEASE_DATE=2026-05-26 ./pack_release.sh
 ```
 
 ## Why not just use a regular vector program?
@@ -214,15 +179,15 @@ detect color → separate area → build contour → remove noise → reduce poi
 | Area | Info |
 |---|---|
 | Name | Vektorrazor |
-| Language | Python |
+| Type | Desktop application |
 | GUI | Tkinter |
+| Ready-to-use downloads | Windows amd64 EXE, Linux amd64 binary |
 | Input | PNG, JPG, BMP, WEBP, TIFF |
 | Intermediate format | technically cleaned PNG |
 | Export | DXF, SVG |
 | DXF compatibility | R2000, R2004, R2007, R2010, R2013, R2018 |
 | Goal | more CAD-friendly contours from prepared logos |
-| Windows build | Windows amd64 EXE |
-| Linux build | Linux amd64 binary |
+| License | GPL-3.0 |
 
 ## Main features
 
@@ -239,7 +204,7 @@ detect color → separate area → build contour → remove noise → reduce poi
 - select and remove paths in the preview
 - SVG and DXF export
 - DXF compatibility presets for different programs
-- Windows and Linux amd64 builds possible
+- ready-to-use Windows amd64 and Linux amd64 downloads via GitHub Releases
 
 ## Copyright / Ownership
 

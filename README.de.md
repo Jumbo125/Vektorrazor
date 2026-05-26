@@ -20,11 +20,12 @@
   <img src="https://img.shields.io/badge/License-GPLv3-blue" alt="License">
   <img src="https://img.shields.io/badge/Status-Prototype%20%2F%20CAD%20Workflow-yellow" alt="Status">
 </p>
+
 <p align="center"><strong>Copyright (C) 2026 Andreas Rottmann</strong></p>
 
 ## Kurzbeschreibung
 
-**Vektorrazor** ist ein Python/Tkinter-Tool, das vorbereitete PNG-Logos in CAD-nähere Vektordaten umwandelt.
+**Vektorrazor** ist ein Desktop-Tool, das vorbereitete PNG-Logos in CAD-nähere Vektordaten umwandelt.
 
 Der Workflow ist bewusst zweistufig:
 
@@ -33,130 +34,100 @@ Der Workflow ist bewusst zweistufig:
 2. Vektorisieren / Konturen prüfen / DXF oder SVG exportieren
 ```
 
-## Superkurzer Quickguide
+## Schnellstart mit fertiger Datei
 
-### Windows
+### Windows amd64
 
-1. `python main.py` starten.
-2. In **Schritt 1** das PNG laden.
-3. Farben reduzieren oder technische Kontrastfarben erzeugen.
-4. **Weiter zur Vektorisierung** klicken.
-5. In **Schritt 2** **Erkennen / Vorschau** klicken.
-6. Ungewollte Pfade bei Bedarf im Auswahlmodus entfernen.
-7. DXF-Kompatibilität wählen, z. B. **Illustrator/CorelDRAW empfohlen**.
-8. **Export DXF / SVG** klicken.
+1. Auf GitHub unter **Releases** die Windows-Datei herunterladen:
 
-### Linux / WSL Ubuntu
-
-1. Systempakete installieren:
-
-```bash
-sudo apt update
-sudo apt install python3-tk python3-venv python3-pip
+```text
+Vektorrazor-Windows-amd64-YYYY-MM-DD.zip
 ```
 
-2. Virtuelle Umgebung erstellen:
+2. ZIP-Datei entpacken.
+3. `Vektorrazor.exe` starten.
+4. Falls Windows SmartScreen warnt: **Weitere Informationen → Trotzdem ausführen**.
+5. Im Programm:
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
+```text
+PNG laden → Weiter zur Vektorisierung → Erkennen / Vorschau → Export DXF / SVG
 ```
 
-3. Python-Abhängigkeiten installieren:
+### Linux amd64
+
+1. Auf GitHub unter **Releases** die Linux-Datei herunterladen:
+
+```text
+Vektorrazor-Linux-amd64-YYYY-MM-DD.tar.gz
+```
+
+2. Archiv entpacken:
 
 ```bash
-pip install -r requirements.txt
+tar -xzf Vektorrazor-Linux-amd64-YYYY-MM-DD.tar.gz
+cd Vektorrazor-Linux-amd64-YYYY-MM-DD
+```
+
+3. Datei ausführbar machen:
+
+```bash
+chmod +x Vektorrazor
 ```
 
 4. Programm starten:
 
 ```bash
-python main.py
+./Vektorrazor
 ```
 
-5. Workflow verwenden:
-
-```text
-PNG laden → Weiter zur Vektorisierung → Erkennen / Vorschau → Export
-```
-
-Hinweis: Unter WSL muss eine grafische Oberfläche verfügbar sein. Unter Windows 11 funktioniert das meist über WSLg. Bei älteren Setups kann ein X-Server nötig sein.
+Hinweis: Unter Linux muss eine grafische Oberfläche vorhanden sein. Unter WSL funktioniert das mit Windows 11 meist über WSLg. Bei älteren WSL-Setups kann ein X-Server nötig sein.
 
 ## Installation
 
+Für normale Benutzer ist keine Python-Installation nötig. Es gibt fertige Release-Dateien:
+
+| System | Datei | Aktion |
+|---|---|---|
+| Windows amd64 | `Vektorrazor-Windows-amd64-YYYY-MM-DD.zip` | entpacken und `Vektorrazor.exe` starten |
+| Linux amd64 | `Vektorrazor-Linux-amd64-YYYY-MM-DD.tar.gz` | entpacken, ausführbar machen und starten |
+
 ### Windows
 
+```text
+ZIP herunterladen → entpacken → Vektorrazor.exe starten
+```
+
+### Linux
+
+```bash
+tar -xzf Vektorrazor-Linux-amd64-YYYY-MM-DD.tar.gz
+cd Vektorrazor-Linux-amd64-YYYY-MM-DD
+chmod +x Vektorrazor
+./Vektorrazor
+```
+
+## Hinweise für Entwickler
+
+Der Quellcode liegt ebenfalls im Repository. Wer selbst entwickeln oder eigene Builds erstellen möchte, kann das weiterhin mit Python und PyInstaller tun.
+
+### Aus Source starten
+
 ```bash
 pip install -r requirements.txt
 python main.py
 ```
 
-### Linux / Ubuntu / WSL
-
-```bash
-sudo apt update
-sudo apt install python3-tk python3-venv python3-pip
-
-python3 -m venv .venv
-source .venv/bin/activate
-
-pip install -r requirements.txt
-python main.py
-```
-
-## Windows-EXE bauen
+### Windows-EXE selbst bauen
 
 ```bat
 pyinstaller --onefile --windowed --clean --name Vektorrazor --icon assets\vektorrazor.ico --version-file version_info.txt --add-data "assets\vektorrazor.ico;assets" --add-data "assets\vektorrazor_icon.png;assets" main.py
 ```
 
-Oder einfach:
-
-```bat
-build_windows.bat
-```
-
-Das Icon liegt unter:
-
-```text
-assets/vektorrazor.ico
-```
-
-Es wird mit `--icon` in die EXE eingebettet und zusätzlich mit `--add-data` für das Fenster-Icon mitgeliefert.
-
-## Linux-amd64 Build bauen
-
-Unter Linux / WSL Ubuntu:
+### Linux-amd64 selbst bauen
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-
-pip install -r requirements.txt
-pip install pyinstaller
-
-pyinstaller --onefile --windowed --clean \
-  --name Vektorrazor \
-  --add-data "assets/vektorrazor.ico:assets" \
-  --add-data "assets/vektorrazor_icon.png:assets" \
-  main.py
+pyinstaller --onefile --windowed --clean   --name Vektorrazor   --add-data "assets/vektorrazor.ico:assets"   --add-data "assets/vektorrazor_icon.png:assets"   main.py
 ```
-
-Das Ergebnis liegt danach hier:
-
-```text
-dist/Vektorrazor
-```
-
-Starten:
-
-```bash
-chmod +x dist/Vektorrazor
-./dist/Vektorrazor
-```
-
-Wichtig: Unter Linux verwendet PyInstaller bei `--add-data` einen Doppelpunkt `:`.  
-Unter Windows wird ein Semikolon `;` verwendet.
 
 ## Release-Pakete erstellen
 
@@ -180,12 +151,6 @@ Es erzeugt z. B.:
 release/Vektorrazor-Windows-amd64-2026-05-26.zip
 release/Vektorrazor-Linux-amd64-2026-05-26.tar.gz
 release/SHA256SUMS-2026-05-26.txt
-```
-
-Mit fixem Datum:
-
-```bash
-RELEASE_DATE=2026-05-26 ./pack_release.sh
 ```
 
 ## Warum nicht einfach ein normales Vektorprogramm?
@@ -214,15 +179,15 @@ Farbe erkennen → Fläche trennen → Kontur bilden → Störungen entfernen �
 | Bereich | Info |
 |---|---|
 | Name | Vektorrazor |
-| Sprache | Python |
+| Typ | Desktop-Programm |
 | Oberfläche | Tkinter |
+| Fertige Downloads | Windows amd64 EXE, Linux amd64 Binary |
 | Input | PNG, JPG, BMP, WEBP, TIFF |
 | Zwischenformat | technisch bereinigtes PNG |
 | Export | DXF, SVG |
 | DXF-Kompatibilität | R2000, R2004, R2007, R2010, R2013, R2018 |
 | Ziel | CAD-freundlichere Konturen aus vorbereiteten Logos |
-| Windows Build | Windows amd64 EXE |
-| Linux Build | Linux amd64 Binary |
+| Lizenz | GPL-3.0 |
 
 ## Aktuelle Hauptfunktionen
 
@@ -239,7 +204,7 @@ Farbe erkennen → Fläche trennen → Kontur bilden → Störungen entfernen �
 - Pfade in der Vorschau auswählen und entfernen
 - SVG- und DXF-Export
 - DXF-Kompatibilitätsauswahl für verschiedene Programme
-- Windows- und Linux-amd64-Build möglich
+- fertige Windows-amd64- und Linux-amd64-Dateien über GitHub Releases
 
 ## Copyright / Urheberrecht
 
