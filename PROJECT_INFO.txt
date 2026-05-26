@@ -1,0 +1,15 @@
+Vektorrazor
+===========
+PNG-Logo zu CAD-orientierten Vektorkonturen.
+
+Start:
+  python main.py
+
+Build:
+  build_windows.bat
+
+Lizenz:
+  GPL-3.0
+
+Copyright:
+  Copyright (C) 2026 Andreas Rottmann

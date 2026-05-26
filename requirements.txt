@@ -1,0 +1,5 @@
+pillow
+numpy
+opencv-python
+ezdxf
+svgwrite
