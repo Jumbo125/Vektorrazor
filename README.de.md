@@ -153,6 +153,28 @@ release/Vektorrazor-Linux-amd64-2026-05-26.tar.gz
 release/SHA256SUMS-2026-05-26.txt
 ```
 
+## Sprachen nutzen und ergänzen
+
+Die Anwendung lädt Sprachdateien aus dem Ordner `lang/`.
+
+- Dateinamen: `lang/lang_de.json`, `lang/lang_en.json`
+- Priorität bei PyInstaller: `lang/` neben der EXE hat Vorrang
+- Entwicklung aus Source: `lang/` im Projektordner wird genutzt
+- Fehlt `lang/` oder sind Dateien unvollständig, greift der harte Python-Fallback (Deutsch)
+
+Sprache in der App wechseln:
+
+1. App starten.
+2. Im Header die Sprache im Dropdown wählen.
+3. Die sichtbaren Texte werden ohne Neustart aktualisiert.
+
+Neue Sprache ergänzen:
+
+1. Neue Datei `lang/lang_xx.json` anlegen.
+2. Key `"language.name"` setzen, z. B. `"English"`.
+3. Bestehende Keys aus `lang/lang_de.json` übernehmen und übersetzen.
+4. Fehlende Keys sind erlaubt; sie fallen automatisch auf den Fallback zurück und werden in der Konsole gemeldet.
+
 ## Warum nicht einfach ein normales Vektorprogramm?
 
 Programme wie Illustrator, CorelDRAW oder Inkscape können optisch sehr hochwertige Vektorergebnisse liefern. Für klassische Grafik ist das oft perfekt.

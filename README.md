@@ -15,11 +15,12 @@
 
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3.9%2B-blue" alt="Python">
-  <img src="https://img.shields.io/badge/GUI-Tkinter-brightgreen" alt="GUI">
-  <img src="https://img.shields.io/badge/Export-DXF%20%7C%20SVG-orange" alt="Export">
-  <img src="https://img.shields.io/badge/License-GPLv3-blue" alt="License">
-  <img src="https://img.shields.io/badge/Status-Prototype%20%2F%20CAD%20Workflow-yellow" alt="Status">
+![Python](https://img.shields.io/badge/Python-3.9%2B-blue)
+![GUI](https://img.shields.io/badge/GUI-Tkinter-brightgreen)
+![Export](https://img.shields.io/badge/Export-DXF%20%7C%20SVG-orange)
+![License](https://img.shields.io/badge/License-GPLv3-blue)
+![Status](https://img.shields.io/badge/Status-Prototype%20%2F%20CAD%20Workflow-yellow)
+
 </p>
 
 <p align="center"><strong>Copyright (C) 2026 Andreas Rottmann</strong></p>

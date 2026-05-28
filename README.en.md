@@ -153,6 +153,28 @@ release/Vektorrazor-Linux-amd64-2026-05-26.tar.gz
 release/SHA256SUMS-2026-05-26.txt
 ```
 
+## Use and extend languages
+
+The application loads language files from the `lang/` folder.
+
+- File names: `lang/lang_de.json`, `lang/lang_en.json`
+- PyInstaller priority: external `lang/` next to the EXE is preferred
+- Source/development mode: project-local `lang/` is used
+- If `lang/` is missing or files are incomplete, the hardcoded Python fallback (German) is used
+
+Change language in the app:
+
+1. Start the app.
+2. Select a language in the header dropdown.
+3. Visible texts refresh without restarting.
+
+Add a new language:
+
+1. Create a new file `lang/lang_xx.json`.
+2. Set the key `"language.name"`, for example `"English"`.
+3. Copy keys from `lang/lang_de.json` and translate values.
+4. Missing keys are allowed; they automatically fall back and are printed to the console.
+
 ## Why not just use a regular vector program?
 
 Tools like Illustrator, CorelDRAW or Inkscape can produce visually excellent vector artwork. For graphic design, that is often exactly what you want.
