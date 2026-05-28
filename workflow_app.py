@@ -28,6 +28,8 @@ from PIL import Image, ImageTk, ImageDraw
 
 import recolor_engine as recolor
 import vector_engine as vector
+import i18n
+from i18n import tr
 
 
 def resource_path(relative_path: str) -> Path:
@@ -41,35 +43,40 @@ RGB = Tuple[int, int, int]
 
 
 DXF_COMPATIBILITY_PRESETS = {
-    "Illustrator / CorelDRAW (empfohlen)": (
+    "default": (
         "R2000",
         "Empfohlen für Grafikprogramme: robust, alt genug und für viele Importfilter gut lesbar."
     ),
-    "Adobe Illustrator": (
+    "illustrator": (
         "R2007",
         "Illustrator-kompatibler Modus bis AutoCAD 2007. Falls Import scheitert: R2000 wählen."
     ),
-    "CorelDRAW": (
+    "coreldraw": (
         "R2000",
         "Robuster CorelDRAW-Modus. Corel kann zwar neuere AutoCAD-Versionen, R2000 ist oft stabiler."
     ),
-    "CorelDRAW modern": (
+    "coreldraw_modern": (
         "R2007",
         "Für neuere CorelDRAW-Versionen. Bei Importproblemen zurück auf R2000."
     ),
-    "AutoCAD / CAD modern": (
+    "autocad": (
         "R2010",
         "Für moderne CAD-Programme. Nicht ideal für Illustrator."
     ),
-    "FreeCAD / LibreCAD / CAM": (
+    "freecad": (
         "R2000",
         "Allgemeiner Austauschmodus für freie CAD/CAM-Programme."
     ),
-    "Manuell": (
+    "manual": (
         "R2000",
         "DXF-Format rechts selbst wählen."
     ),
 }
+
+DXF_COMPATIBILITY_KEYS = list(DXF_COMPATIBILITY_PRESETS.keys())
+VECTOR_MODE_KEYS = ["area", "centerline"]
+PREVIEW_MODE_KEYS = ["object", "contour", "mask"]
+CLEANUP_MODE_KEYS = ["off", "mm2", "percent"]
 
 
 DXF_VERSION_CHOICES = {
@@ -267,10 +274,14 @@ class ManualWorkflowRow:
 class WorkflowApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Vektorrazor - PNG Logo zu CAD-tauglichen Vektordaten")
+        i18n.load_languages()
+        self.title(tr("app.title"))
         self._set_window_icon()
         self.geometry("1480x920")
         self.minsize(1180, 760)
+
+        self._i18n_widgets: list[tuple[tk.Widget, str, str]] = []
+        self._i18n_notebook_tabs: list[tuple[ttk.Notebook, tk.Widget, str]] = []
 
         self.current_step = 0
         self.original_image: Optional[Image.Image] = None
@@ -304,25 +315,31 @@ class WorkflowApp(tk.Tk):
 
         # Schritt 2 Variablen
         self.vector_image_rgb: Optional[np.ndarray] = None
-        self.vector_source_name_var = tk.StringVar(value="Noch kein Zwischenbild übernommen")
+        self.vector_source_name_var = tk.StringVar(value=tr("status.no_intermediate"))
         self.output_path_var = tk.StringVar()
         self.pixel_to_mm_var = tk.StringVar(value="1.0")
-        self.dxf_compatibility_var = tk.StringVar(value="Illustrator / CorelDRAW (empfohlen)")
+        self.dxf_compatibility_var = tk.StringVar(value="default")
+        self.dxf_compatibility_display_var = tk.StringVar()
         self.dxf_version_var = tk.StringVar(value=_dxf_choice_for_version("R2000"))
         self.dxf_compatibility_info_var = tk.StringVar(
-            value=DXF_COMPATIBILITY_PRESETS["Illustrator / CorelDRAW (empfohlen)"][1] + "  Aktuell: DXF R2000"
+            value=DXF_COMPATIBILITY_PRESETS["default"][1] + "  Aktuell: DXF R2000"
         )
         self.profile_var = tk.StringVar(value="Standard")
-        self.vector_mode_var = tk.StringVar(value="Flächenkontur")
+        self.vector_mode_var = tk.StringVar(value="area")
+        self.vector_mode_display_var = tk.StringVar()
         self.centerline_merge_px_var = tk.StringVar(value="0")
         self.closed_paths_only_var = tk.BooleanVar(value=True)
         self.fill_closed_shapes_var = tk.BooleanVar(value=False)
-        self.preview_mode_var = tk.StringVar(value="Objektcheck")
+        self.preview_mode_var = tk.StringVar(value="object")
+        self.preview_mode_display_var = tk.StringVar()
         self.use_bezier_var = tk.BooleanVar(value=False)
+        self.unique_cad_lines_var = tk.BooleanVar(value=True)
+        self.duplicate_line_tolerance_var = tk.StringVar(value="1,5")
         self.remove_loose_points_var = tk.BooleanVar(value=False)
         self.smooth_contours_var = tk.BooleanVar(value=True)
         self.smooth_strength_var = tk.StringVar(value="2")
-        self.cleanup_mode_var = tk.StringVar(value="% Bildfläche")
+        self.cleanup_mode_var = tk.StringVar(value="percent")
+        self.cleanup_mode_display_var = tk.StringVar()
         self.min_object_area_mm2_var = tk.StringVar(value="0")
         self.min_object_percent_var = tk.StringVar(value="0,01")
         self.detected_contours: List[Any] = []
@@ -333,13 +350,190 @@ class WorkflowApp(tk.Tk):
         self.vector_selection_mode_var = tk.BooleanVar(value=False)
         self.selected_contour_text_var = tk.StringVar(value="Kein Pfad ausgewählt")
 
-        self.status_var = tk.StringVar(value="Bereit")
+        self.status_var = tk.StringVar(value=tr("status.ready"))
         self.progress_var = tk.DoubleVar(value=0.0)
 
         self._build_ui()
         self.add_manual_row()
         self.load_vector_profile("Standard")
         self.show_step(0)
+
+    def _register_i18n(self, widget: tk.Widget, option: str, key: str) -> None:
+        self._i18n_widgets.append((widget, option, key))
+        try:
+            widget.configure(**{option: tr(key)})
+        except Exception:
+            pass
+
+    def _register_notebook_tab(self, notebook: ttk.Notebook, tab: tk.Widget, key: str) -> None:
+        self._i18n_notebook_tabs.append((notebook, tab, key))
+        try:
+            notebook.tab(tab, text=tr(key))
+        except Exception:
+            pass
+
+    def _language_display_to_code(self) -> dict[str, str]:
+        return {name: code for code, name in i18n.available_languages()}
+
+    def _compat_label(self, key: str) -> str:
+        return tr(f"dxf.compat.{key}")
+
+    def _mode_label(self, key: str) -> str:
+        return tr(f"vector_mode.{key}")
+
+    def _preview_label(self, key: str) -> str:
+        return tr(f"preview_mode.{key}")
+
+    def _cleanup_label(self, key: str) -> str:
+        return tr(f"cleanup.{key}")
+
+    def _refresh_combobox_labels(self) -> None:
+        if hasattr(self, "language_box"):
+            languages = i18n.available_languages()
+            self.language_box.configure(values=[name for _code, name in languages])
+            current = i18n.current_language()
+            for code, name in languages:
+                if code == current:
+                    self.language_var.set(name)
+                    break
+
+        if hasattr(self, "compat_box"):
+            self.compat_box.configure(values=[self._compat_label(key) for key in DXF_COMPATIBILITY_KEYS])
+            self.dxf_compatibility_display_var.set(self._compat_label(self.dxf_compatibility_var.get()))
+        if hasattr(self, "vector_mode_box"):
+            self.vector_mode_box.configure(values=[self._mode_label(key) for key in VECTOR_MODE_KEYS])
+            self.vector_mode_display_var.set(self._mode_label(self.vector_mode_var.get()))
+        if hasattr(self, "preview_mode_box"):
+            self.preview_mode_box.configure(values=[self._preview_label(key) for key in PREVIEW_MODE_KEYS])
+            self.preview_mode_display_var.set(self._preview_label(self.preview_mode_var.get()))
+        if hasattr(self, "cleanup_mode_box"):
+            self.cleanup_mode_box.configure(values=[self._cleanup_label(key) for key in CLEANUP_MODE_KEYS])
+            self.cleanup_mode_display_var.set(self._cleanup_label(self.cleanup_mode_var.get()))
+
+    def refresh_ui_texts(self) -> None:
+        self.title(tr("app.title"))
+        for widget, option, key in self._i18n_widgets:
+            try:
+                widget.configure(**{option: tr(key)})
+            except Exception:
+                pass
+        for notebook, tab, key in self._i18n_notebook_tabs:
+            try:
+                notebook.tab(tab, text=tr(key))
+            except Exception:
+                pass
+        self._refresh_combobox_labels()
+        self.on_dxf_compatibility_changed()
+        self.show_step(self.current_step)
+
+    def _register_existing_texts(self) -> None:
+        text_to_key = {
+            "PNG-Logo → CAD-nahe Vektordaten": "app.header",
+            "Input-Bild:": "step1.input_image",
+            "Bild laden": "step1.load_image",
+            "PNG speichern": "step1.save_png",
+            "Workflow / Abschluss Schritt 1": "step1.actions",
+            "Weiter zur Vektorisierung →": "nav.next_vectorize",
+            "Zwischenbild nur aktualisieren": "step1.update_intermediate",
+            "Hinweis: 'Weiter zur Vektorisierung' übernimmt das bearbeitete Bild automatisch. Der Aktualisieren-Button ist nur optional.": "step1.update_hint",
+            "1) Bildvorbereitung": "step1.prep",
+            "Helligkeit": "step1.brightness",
+            "Kontrast": "step1.contrast",
+            "Schwarzpunkt": "step1.black_point",
+            "Weißpunkt": "step1.white_point",
+            "Gamma": "step1.gamma",
+            "Zurücksetzen": "step1.reset",
+            "Vorbereitung + Farben neu erkennen": "step1.prep_detect",
+            "2) Automatische Farberkennung": "step1.detect",
+            "Schwelle": "step1.threshold",
+            "Min. Fläche": "step1.min_area",
+            "Max. Farben": "step1.max_colors",
+            "Alpha ab": "step1.alpha_from",
+            "Farben erkennen": "step1.detect_colors",
+            "Kontrastfarben neu": "step1.reassign",
+            "Tipp: Schritt 1 schreibt exakte RGB-Farben ins Zwischen-PNG. Diese RGB-Werte werden in Schritt 2 automatisch als Layer-Regeln übernommen.": "step1.basic_hint",
+            "3) Erkannte Farbbereiche": "step1.detected_ranges",
+            "Aktiv  Quelle / Anteil  → Ziel-RGB": "step1.rows_header",
+            "+ Farbumsetzung": "step1.add_mapping",
+            "- selektierte löschen": "step1.delete_selected",
+            "Kurzer Klick ins Originalbild übernimmt Farbe in die selektierte Zeile. Ziehen verschiebt die Vorschau.": "step1.manual_status",
+            "Manuelle Farbumsetzungen": "step1.manual_mappings",
+            "Für graue Logos, Schatten oder Verläufe: Maske über lokalen Kontrast erzeugen.": "step1.logo_hint",
+            "Logo-Schwelle": "step1.logo_threshold",
+            "höher = weniger wird schwarz": "step1.logo_threshold_hint",
+            "Hintergrund-Radius": "step1.logo_radius",
+            "größer = Schatten/Verläufe werden eher ignoriert": "step1.logo_radius_hint",
+            "Logo RGB": "step1.logo_rgb",
+            "Hintergrund RGB": "step1.background_rgb",
+            "kleine Pixelstörungen glätten": "step1.clean_pixels",
+            "Logo-Maske erzeugen": "step1.create_mask",
+            "Maske entfernen / normale Vorschau": "step1.clear_mask",
+            "Zwischenbild:": "step2.source",
+            "PNG direkt laden": "step2.load_png",
+            "Output:": "step2.output",
+            "Speichern als": "step2.save_as",
+            "Pixel zu mm:": "step2.pixel_to_mm",
+            "Kompatibilität:": "step2.compatibility",
+            "DXF-Format:": "step2.dxf_format",
+            "Abschluss / Aktionen": "step2.actions",
+            "1  Optional: Auto-Werte testen": "step2.auto",
+            "2  Erkennen / Vorschau": "step2.detect_preview",
+            "3  Export DXF / SVG": "step2.export",
+            "Auto-Werte ist optional und rechnet selbst eine Vorschau. Danach Vorschau prüfen oder direkt exportieren.": "step2.actions_hint",
+            "Farben / Layer": "step2.colors_layer",
+            "Dynamische Farbtabelle": "step2.dynamic_table",
+            "+ Farbe": "step2.add_color",
+            "Profil:": "step2.profile",
+            "Anwenden": "step2.apply",
+            "Vektor-Optionen": "step2.options",
+            "Vektorart": "step2.vector_type",
+            "Linien zusammenführen px": "step2.merge_lines",
+            "Nur geschlossene Pfade": "step2.closed_only",
+            "SVG-Flächen füllen (Export)": "step2.fill_svg",
+            "Bezier für SVG": "step2.bezier_svg",
+            "Doppelte Linien entfernen (CAD)": "step2.dedupe",
+            "Doppellinien-Toleranz px": "step2.dedupe_tolerance",
+            "Vorschau-Modus": "step2.preview_mode",
+            "Lose Ankerpunkte entfernen": "step2.loose_points",
+            "Rundungen glätten": "step2.smooth",
+            "Kleine Objekte löschen": "step2.delete_small",
+            "% Bildfläche": "step2.percent_area",
+            "Pfad-Auswahl": "step2.path_selection",
+            "Auswahl-Modus": "step2.selection_mode",
+            "Ausgewählte Pfade entfernen": "step2.remove_selected_paths",
+            "Auswahl aufheben": "step2.clear_selection",
+            "Auswahl-Modus EIN: Klick = Pfad wählen, STRG+Klick = hinzufügen/umschalten, ALT+Klick = direkt entfernen. Auswahl-Modus AUS: Klick/Ziehen verschiebt die Vorschau; nur STRG+Klick wählt temporär.": "step2.selection_help",
+            "Original": "canvas.original",
+            "Bearbeitet / technische Zwischenstufe": "canvas.edited",
+            "Zwischen-PNG": "canvas.step2_original",
+            "Vektor-Vorschau": "canvas.vector_preview",
+            "wählen": "button.choose",
+            "Tol.": "label.tolerance_short",
+        }
+
+        def walk(widget: tk.Widget) -> None:
+            try:
+                text = str(widget.cget("text"))
+                key = text_to_key.get(text)
+                if key:
+                    self._register_i18n(widget, "text", key)
+            except Exception:
+                pass
+            for child in widget.winfo_children():
+                walk(child)
+
+        walk(self)
+        self._register_notebook_tab(self.step1_notebook, self.basic_tab, "step1.tab_basic")
+        self._register_notebook_tab(self.step1_notebook, self.manual_tab, "step1.tab_manual")
+        self._register_notebook_tab(self.step1_notebook, self.logo_tab, "step1.tab_logo")
+
+    def on_language_changed(self, _event: tk.Event | None = None) -> None:
+        code = self._language_display_to_code().get(self.language_var.get())
+        if not code or not i18n.set_language(code):
+            return
+        self.refresh_ui_texts()
+        message = i18n.language_status_message() or tr("status.language_changed")
+        self.status_var.set(message)
 
     def _set_window_icon(self) -> None:
         """Fenster-Icon aus assets setzen. PyInstaller packt es per --add-data in die EXE."""
@@ -372,6 +566,10 @@ class WorkflowApp(tk.Tk):
         ttk.Label(header, text="PNG-Logo → CAD-nahe Vektordaten", font=("Segoe UI", 14, "bold")).grid(row=0, column=0, sticky="w")
         self.step_label = ttk.Label(header, text="", font=("Segoe UI", 10, "bold"))
         self.step_label.grid(row=0, column=1, padx=(18, 0), sticky="w")
+        self.language_var = tk.StringVar()
+        self.language_box = ttk.Combobox(header, textvariable=self.language_var, state="readonly", width=20)
+        self.language_box.grid(row=0, column=2, sticky="e", padx=(8, 10))
+        self.language_box.bind("<<ComboboxSelected>>", self.on_language_changed)
         # Navigation bewusst als große, farbige Buttons:
         # Man sieht sofort, was der nächste Workflow-Schritt ist.
         self.back_btn = tk.Button(
@@ -425,6 +623,11 @@ class WorkflowApp(tk.Tk):
         footer.columnconfigure(0, weight=1)
         ttk.Label(footer, textvariable=self.status_var).grid(row=0, column=0, sticky="w")
         ttk.Progressbar(footer, variable=self.progress_var, maximum=100).grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        self._register_existing_texts()
+        self._refresh_combobox_labels()
+        language_message = i18n.language_status_message()
+        if language_message:
+            self.status_var.set(language_message)
 
     def _build_step1(self) -> None:
         frame = self.step1_frame
@@ -614,15 +817,15 @@ class WorkflowApp(tk.Tk):
         ttk.Entry(toolbar, textvariable=self.pixel_to_mm_var, width=8).grid(row=1, column=4, sticky="w", pady=(4, 0))
 
         ttk.Label(toolbar, text="Kompatibilität:").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=(6, 0))
-        compat_box = ttk.Combobox(
+        self.compat_box = ttk.Combobox(
             toolbar,
-            textvariable=self.dxf_compatibility_var,
-            values=list(DXF_COMPATIBILITY_PRESETS.keys()),
+            textvariable=self.dxf_compatibility_display_var,
+            values=[self._compat_label(key) for key in DXF_COMPATIBILITY_KEYS],
             state="readonly",
             width=32,
         )
-        compat_box.grid(row=2, column=1, sticky="w", pady=(6, 0))
-        compat_box.bind("<<ComboboxSelected>>", lambda _event: self.on_dxf_compatibility_changed())
+        self.compat_box.grid(row=2, column=1, sticky="w", pady=(6, 0))
+        self.compat_box.bind("<<ComboboxSelected>>", lambda _event: self.on_dxf_compatibility_display_changed())
 
         ttk.Label(toolbar, text="DXF-Format:").grid(row=2, column=2, sticky="w", padx=(12, 4), pady=(6, 0))
         version_box = ttk.Combobox(
@@ -739,21 +942,33 @@ class WorkflowApp(tk.Tk):
         opts.grid(row=3, column=0, sticky="ew")
         opts.columnconfigure(2, weight=1)
         ttk.Label(opts, text="Vektorart").grid(row=0, column=0, sticky="w")
-        ttk.Combobox(opts, textvariable=self.vector_mode_var, values=["Flächenkontur", "Mittellinie / Gravur"], state="readonly", width=20).grid(row=0, column=1, sticky="w", padx=(4, 12))
+        self.vector_mode_box = ttk.Combobox(opts, textvariable=self.vector_mode_display_var, values=[self._mode_label(key) for key in VECTOR_MODE_KEYS], state="readonly", width=20)
+        self.vector_mode_box.grid(row=0, column=1, sticky="w", padx=(4, 12))
+        self.vector_mode_box.bind("<<ComboboxSelected>>", lambda _event: self.on_vector_mode_display_changed())
         ttk.Label(opts, text="Linien zusammenführen px").grid(row=0, column=2, sticky="w")
         ttk.Entry(opts, textvariable=self.centerline_merge_px_var, width=8).grid(row=0, column=3, sticky="w", padx=(4, 0))
         ttk.Checkbutton(opts, text="Nur geschlossene Pfade", variable=self.closed_paths_only_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Checkbutton(opts, text="SVG-Flächen füllen (Export)", variable=self.fill_closed_shapes_var).grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
         ttk.Checkbutton(opts, text="Bezier für SVG", variable=self.use_bezier_var).grid(row=3, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        ttk.Checkbutton(
+            opts,
+            text="Doppelte Linien entfernen (CAD)",
+            variable=self.unique_cad_lines_var,
+            command=self.render_vector_preview
+        ).grid(row=3, column=2, columnspan=2, sticky="w", pady=(2, 0))
+        ttk.Label(opts, text="Doppellinien-Toleranz px").grid(row=6, column=2, sticky="w", pady=(8, 0))
+        ttk.Entry(opts, textvariable=self.duplicate_line_tolerance_var, width=8).grid(row=6, column=3, sticky="w", padx=(4, 0), pady=(8, 0))
         ttk.Label(opts, text="Vorschau-Modus").grid(row=6, column=0, sticky="w", pady=(8, 0))
-        preview_mode_box = ttk.Combobox(opts, textvariable=self.preview_mode_var, values=["Objektcheck", "Konturlinien", "Farbmaske"], state="readonly", width=18)
-        preview_mode_box.grid(row=6, column=1, sticky="w", padx=(4, 12), pady=(8, 0))
-        preview_mode_box.bind("<<ComboboxSelected>>", lambda _event: self.render_vector_preview())
+        self.preview_mode_box = ttk.Combobox(opts, textvariable=self.preview_mode_display_var, values=[self._preview_label(key) for key in PREVIEW_MODE_KEYS], state="readonly", width=18)
+        self.preview_mode_box.grid(row=6, column=1, sticky="w", padx=(4, 12), pady=(8, 0))
+        self.preview_mode_box.bind("<<ComboboxSelected>>", lambda _event: self.on_preview_mode_display_changed())
         ttk.Checkbutton(opts, text="Lose Ankerpunkte entfernen", variable=self.remove_loose_points_var).grid(row=1, column=2, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Checkbutton(opts, text="Rundungen glätten", variable=self.smooth_contours_var).grid(row=2, column=2, sticky="w", pady=(2, 0))
         ttk.Entry(opts, textvariable=self.smooth_strength_var, width=8).grid(row=2, column=3, sticky="w", padx=(4, 0), pady=(2, 0))
         ttk.Label(opts, text="Kleine Objekte löschen").grid(row=4, column=0, sticky="w", pady=(8, 0))
-        ttk.Combobox(opts, textvariable=self.cleanup_mode_var, values=["Aus", "mm²", "% Bildfläche"], state="readonly", width=12).grid(row=4, column=1, sticky="w", padx=(4, 12), pady=(8, 0))
+        self.cleanup_mode_box = ttk.Combobox(opts, textvariable=self.cleanup_mode_display_var, values=[self._cleanup_label(key) for key in CLEANUP_MODE_KEYS], state="readonly", width=12)
+        self.cleanup_mode_box.grid(row=4, column=1, sticky="w", padx=(4, 12), pady=(8, 0))
+        self.cleanup_mode_box.bind("<<ComboboxSelected>>", lambda _event: self.on_cleanup_mode_display_changed())
         ttk.Label(opts, text="mm²").grid(row=4, column=2, sticky="w", pady=(8, 0))
         ttk.Entry(opts, textvariable=self.min_object_area_mm2_var, width=8).grid(row=4, column=3, sticky="w", padx=(4, 0), pady=(8, 0))
         ttk.Label(opts, text="% Bildfläche").grid(row=5, column=2, sticky="w", pady=(2, 0))
@@ -806,10 +1021,10 @@ class WorkflowApp(tk.Tk):
         self.current_step = max(0, min(1, index))
         if self.current_step == 0:
             self.step1_frame.tkraise()
-            self.step_label.configure(text="Schritt 1 von 2: Bild bearbeiten / Farben exakt vorbereiten")
-            self.back_btn.configure(text="← Zurück", state="disabled", bg="#9ca3af", fg="#eeeeee", cursor="arrow")
+            self.step_label.configure(text=tr("step1.label"))
+            self.back_btn.configure(text=tr("nav.back"), state="disabled", bg="#9ca3af", fg="#eeeeee", cursor="arrow")
             self.next_btn.configure(
-                text="Weiter zur Vektorisierung →",
+                text=tr("nav.next_vectorize"),
                 state="normal",
                 bg="#2563eb",
                 fg="white",
@@ -818,9 +1033,9 @@ class WorkflowApp(tk.Tk):
             )
         else:
             self.step2_frame.tkraise()
-            self.step_label.configure(text="Schritt 2 von 2: Vektorisieren / DXF oder SVG exportieren")
+            self.step_label.configure(text=tr("step2.label"))
             self.back_btn.configure(
-                text="← Zurück zu Schritt 1",
+                text=tr("nav.back_to_step1"),
                 state="normal",
                 bg="#f97316",
                 fg="white",
@@ -828,7 +1043,7 @@ class WorkflowApp(tk.Tk):
                 cursor="hand2",
             )
             self.next_btn.configure(
-                text="Export DXF / SVG →",
+                text=tr("nav.export"),
                 state="normal",
                 bg="#15803d",
                 fg="white",
@@ -853,11 +1068,20 @@ class WorkflowApp(tk.Tk):
         profile = self.dxf_compatibility_var.get()
         version, info = DXF_COMPATIBILITY_PRESETS.get(
             profile,
-            DXF_COMPATIBILITY_PRESETS["Illustrator / CorelDRAW (empfohlen)"],
+            DXF_COMPATIBILITY_PRESETS["default"],
         )
-        if profile != "Manuell":
+        if profile != "manual":
             self.dxf_version_var.set(_dxf_choice_for_version(version))
+        self.dxf_compatibility_display_var.set(self._compat_label(profile))
         self.dxf_compatibility_info_var.set(f"{info}  Aktuell: DXF {self.get_selected_dxf_version()}")
+
+    def on_dxf_compatibility_display_changed(self) -> None:
+        selected = self.dxf_compatibility_display_var.get()
+        for key in DXF_COMPATIBILITY_KEYS:
+            if selected == self._compat_label(key):
+                self.dxf_compatibility_var.set(key)
+                break
+        self.on_dxf_compatibility_changed()
 
     def on_dxf_version_changed(self) -> None:
         # Wenn der Benutzer das Format selbst ändert, soll sichtbar sein,
@@ -865,12 +1089,35 @@ class WorkflowApp(tk.Tk):
         selected_version = self.get_selected_dxf_version()
         current_profile = self.dxf_compatibility_var.get()
         expected_version = DXF_COMPATIBILITY_PRESETS.get(current_profile, ("", ""))[0]
-        if current_profile != "Manuell" and selected_version != expected_version:
-            self.dxf_compatibility_var.set("Manuell")
+        if current_profile != "manual" and selected_version != expected_version:
+            self.dxf_compatibility_var.set("manual")
+            self.dxf_compatibility_display_var.set(self._compat_label("manual"))
         self.dxf_compatibility_info_var.set(
             f"Manuelles DXF-Format gewählt: {selected_version}. "
             "Bei Grafikprogrammen zuerst R2000 probieren."
         )
+
+    def on_vector_mode_display_changed(self) -> None:
+        selected = self.vector_mode_display_var.get()
+        for key in VECTOR_MODE_KEYS:
+            if selected == self._mode_label(key):
+                self.vector_mode_var.set(key)
+                break
+
+    def on_preview_mode_display_changed(self) -> None:
+        selected = self.preview_mode_display_var.get()
+        for key in PREVIEW_MODE_KEYS:
+            if selected == self._preview_label(key):
+                self.preview_mode_var.set(key)
+                break
+        self.render_vector_preview()
+
+    def on_cleanup_mode_display_changed(self) -> None:
+        selected = self.cleanup_mode_display_var.get()
+        for key in CLEANUP_MODE_KEYS:
+            if selected == self._cleanup_label(key):
+                self.cleanup_mode_var.set(key)
+                break
 
     def set_progress(self, value: float, status: Optional[str] = None) -> None:
         self.progress_var.set(max(0.0, min(100.0, value)))
@@ -892,7 +1139,7 @@ class WorkflowApp(tk.Tk):
         try:
             img = Image.open(path).convert("RGBA")
         except Exception as exc:
-            messagebox.showerror("Fehler beim Laden", str(exc))
+            messagebox.showerror(tr("msg.load_error"), str(exc))
             return
         self.current_path = Path(path)
         self.original_image = img
@@ -955,7 +1202,7 @@ class WorkflowApp(tk.Tk):
 
     def detect_basic_colors(self) -> None:
         if self.original_image is None:
-            messagebox.showwarning("Kein Bild", "Bitte zuerst ein Bild laden.")
+            messagebox.showwarning(tr("msg.no_image_title"), tr("msg.no_image_load"))
             return
         try:
             base = self.get_prepared_image(force=True)
@@ -967,7 +1214,7 @@ class WorkflowApp(tk.Tk):
                 alpha_min=max(0, min(255, int(self.basic_alpha_var.get()))),
             )
         except Exception as exc:
-            messagebox.showerror("Fehler", f"Farben konnten nicht erkannt werden:\n{exc}")
+            messagebox.showerror(tr("msg.error"), f"Farben konnten nicht erkannt werden:\n{exc}")
             return
         self.clear_basic_rows()
         for i, item in enumerate(detected):
@@ -1074,7 +1321,7 @@ class WorkflowApp(tk.Tk):
 
     def create_logo_mask_preview(self) -> None:
         if self.original_image is None:
-            messagebox.showwarning("Kein Bild", "Bitte zuerst ein Bild laden.")
+            messagebox.showwarning(tr("msg.no_image_title"), tr("msg.no_image_load"))
             return
         try:
             base = self.get_prepared_image(force=True)
@@ -1094,7 +1341,7 @@ class WorkflowApp(tk.Tk):
             self.step1_edited_canvas.set_image(self.edited_image, reset_view=False)
             self.status_var.set("Logo-Maske erzeugt. Diese Maske kann direkt in Schritt 2 vektorisiert werden.")
         except Exception as exc:
-            messagebox.showerror("Fehler", f"Logo-Maske konnte nicht erzeugt werden:\n{exc}")
+            messagebox.showerror(tr("msg.error"), f"Logo-Maske konnte nicht erzeugt werden:\n{exc}")
 
     def clear_logo_mask(self) -> None:
         self.special_result_image = None
@@ -1103,7 +1350,7 @@ class WorkflowApp(tk.Tk):
     def export_intermediate_png(self) -> None:
         self.update_step1_preview()
         if self.edited_image is None:
-            messagebox.showwarning("Kein Bild", "Bitte zuerst ein Bild bearbeiten.")
+            messagebox.showwarning(tr("msg.no_image_title"), tr("msg.no_image_edit"))
             return
         initial = "workflow_zwischenbild.png"
         if self.current_path:
@@ -1115,12 +1362,12 @@ class WorkflowApp(tk.Tk):
             self.edited_image.save(path, format="PNG")
             self.status_var.set(f"Zwischen-PNG gespeichert: {path}")
         except Exception as exc:
-            messagebox.showerror("Exportfehler", str(exc))
+            messagebox.showerror(tr("msg.export_error"), str(exc))
 
     def use_edited_for_vector(self, show_message: bool = False) -> bool:
         self.update_step1_preview()
         if self.edited_image is None:
-            messagebox.showwarning("Kein Zwischenbild", "Bitte zuerst ein Bild laden oder bearbeiten.")
+            messagebox.showwarning(tr("msg.no_intermediate_title"), "Bitte zuerst ein Bild laden oder bearbeiten.")
             return False
         rgb_image = _flatten_rgba_to_rgb(self.edited_image)
         self.vector_image_rgb = np.array(rgb_image)
@@ -1139,7 +1386,7 @@ class WorkflowApp(tk.Tk):
                 self.output_path_var.set("vektor_export.dxf")
         self.status_var.set("Bearbeitetes Bild ist für Schritt 2 bereit. Farb-/Layer-Regeln wurden automatisch vorgeschlagen.")
         if show_message:
-            messagebox.showinfo("Übernommen", "Das bearbeitete Bild wurde für Schritt 2 übernommen.")
+            messagebox.showinfo(tr("msg.accepted_title"), tr("msg.accepted"))
         return True
 
     # ------------------------------------------------------------------ Schritt 2 Logik
@@ -1216,7 +1463,7 @@ class WorkflowApp(tk.Tk):
             self.autofill_vector_rows_from_image()
             self.status_var.set(f"PNG geladen: {Path(path).name}")
         except Exception as exc:
-            messagebox.showerror("Fehler beim Laden", str(exc))
+            messagebox.showerror(tr("msg.load_error"), str(exc))
 
     def choose_vector_output(self) -> None:
         path = filedialog.asksaveasfilename(title="Output speichern", defaultextension=".dxf", filetypes=[("DXF-Datei", "*.dxf"), ("SVG-Datei", "*.svg"), ("Alle Dateien", "*.*")])
@@ -1250,9 +1497,15 @@ class WorkflowApp(tk.Tk):
         text = self.centerline_merge_px_var.get().strip()
         return max(0.0, float(text.replace(",", "."))) if text else 0.0
 
+    def get_duplicate_line_tolerance_px(self) -> float:
+        text = self.duplicate_line_tolerance_var.get().strip()
+        if not text:
+            return 1.25
+        return max(0.25, float(text.replace(",", ".")))
+
     def detect_and_preview_vector(self) -> None:
         if self.vector_image_rgb is None:
-            messagebox.showwarning("Kein Zwischenbild", "Bitte zuerst Schritt 1 übernehmen oder ein PNG direkt laden.")
+            messagebox.showwarning(tr("msg.no_intermediate_title"), tr("msg.no_intermediate_step"))
             return
         try:
             self.set_progress(5, "Vektor-Regeln werden gelesen...")
@@ -1262,7 +1515,7 @@ class WorkflowApp(tk.Tk):
             rules = self.get_vector_rules()
             self.last_rules = rules
             pixel_to_mm = self.get_pixel_to_mm()
-            centerline_mode = self.vector_mode_var.get() == "Mittellinie / Gravur"
+            centerline_mode = self.vector_mode_var.get() == "centerline"
             self.set_progress(10, "Konturen werden erkannt...")
             contours = vector.detect_all_contours(
                 self.vector_image_rgb,
@@ -1300,12 +1553,12 @@ class WorkflowApp(tk.Tk):
 
         mode = self.preview_mode_var.get()
         reset = self.step2_vector_canvas.image is None
-        if mode == "Farbmaske":
+        if mode == "mask":
             preview = self.build_filled_mask_preview_image()
             self.draw_selected_contour_overlay(preview)
             self.step2_vector_canvas.set_image(preview, reset_view=reset)
             return
-        if mode == "Objektcheck":
+        if mode == "object":
             preview = self.build_object_check_preview_image()
             self.draw_selected_contour_overlay(preview)
             self.step2_vector_canvas.set_image(preview, reset_view=reset)
@@ -1314,15 +1567,25 @@ class WorkflowApp(tk.Tk):
         h, w = self.vector_image_rgb.shape[:2]
         preview = Image.new("RGB", (w, h), (255, 255, 255))
         draw = ImageDraw.Draw(preview)
-        for item in self.detected_contours:
-            if not item.rule.export or len(item.points) < 2:
-                continue
-            color = tuple(int(v) for v in item.rule.rgb)
-            pts = [(float(x), float(y)) for x, y in item.points]
-            if item.closed and len(pts) >= 3:
-                draw.line(pts + [pts[0]], fill=color, width=2, joint="curve")
-            else:
-                draw.line(pts, fill=color, width=2, joint="curve")
+
+        if self.unique_cad_lines_var.get():
+            for rule, a, b in vector.unique_line_segments_from_contours(
+                self.detected_contours,
+                tolerance_px=self.get_duplicate_line_tolerance_px(),
+                exported_only=True
+            ):
+                color = tuple(int(v) for v in rule.rgb)
+                draw.line([a, b], fill=color, width=2)
+        else:
+            for item in self.detected_contours:
+                if not item.rule.export or len(item.points) < 2:
+                    continue
+                color = tuple(int(v) for v in item.rule.rgb)
+                pts = [(float(x), float(y)) for x, y in item.points]
+                if item.closed and len(pts) >= 3:
+                    draw.line(pts + [pts[0]], fill=color, width=2, joint="curve")
+                else:
+                    draw.line(pts, fill=color, width=2, joint="curve")
         self.draw_selected_contour_overlay(preview)
         self.step2_vector_canvas.set_image(preview, reset_view=reset)
 
@@ -1741,13 +2004,13 @@ class WorkflowApp(tk.Tk):
 
     def auto_optimize_vector_settings(self) -> None:
         if self.vector_image_rgb is None:
-            messagebox.showwarning("Kein Zwischenbild", "Bitte zuerst Schritt 1 übernehmen oder ein PNG direkt laden.")
+            messagebox.showwarning(tr("msg.no_intermediate_title"), tr("msg.no_intermediate_step"))
             return
         original_epsilons = [row.epsilon_var.get() for row in self.vector_rows]
         try:
             self.set_progress(0, "Auto-Werte werden vorbereitet...")
             pixel_to_mm = self.get_pixel_to_mm()
-            centerline_mode = self.vector_mode_var.get() == "Mittellinie / Gravur"
+            centerline_mode = self.vector_mode_var.get() == "centerline"
             if centerline_mode:
                 candidates = [
                     {"epsilon": 0.8, "smooth": 0, "merge": 0.0},
@@ -1812,7 +2075,7 @@ class WorkflowApp(tk.Tk):
 
     def export_vector_file(self) -> None:
         if self.vector_image_rgb is None:
-            messagebox.showwarning("Kein Zwischenbild", "Bitte zuerst Schritt 1 übernehmen oder ein PNG direkt laden.")
+            messagebox.showwarning(tr("msg.no_intermediate_title"), tr("msg.no_intermediate_step"))
             return
         if not self.detected_contours:
             self.detect_and_preview_vector()
@@ -1839,17 +2102,20 @@ class WorkflowApp(tk.Tk):
                     pixel_to_mm,
                     invert_y=True,
                     dxf_version=self.get_selected_dxf_version(),
+                    dedupe_segments=self.unique_cad_lines_var.get(),
+                    dedupe_tolerance_px=self.get_duplicate_line_tolerance_px(),
                 )
             else:
                 raise ValueError("Output muss .dxf oder .svg sein.")
-            self.set_progress(100, f"Export fertig: {out} | DXF {self.get_selected_dxf_version()}")
+            cad_cleanup = "ein / eindeutige Einzellinien" if self.unique_cad_lines_var.get() else "aus / originale Polylines"
+            self.set_progress(100, f"Export fertig: {out} | DXF {self.get_selected_dxf_version()} | Doppellinien-Cleanup: {cad_cleanup}")
             messagebox.showinfo(
-                "Export fertig",
-                f"Datei wurde gespeichert:\n{out}\n\nKompatibilität: {self.dxf_compatibility_var.get()}\nDXF-Format: {self.dxf_version_var.get()}\nDXF-Version intern: {self.get_selected_dxf_version()}"
+                tr("msg.export_done_title"),
+                f"Datei wurde gespeichert:\n{out}\n\nKompatibilität: {self.dxf_compatibility_display_var.get()}\nDXF-Format: {self.dxf_version_var.get()}\nDXF-Version intern: {self.get_selected_dxf_version()}\nDoppelte Linien entfernen: {cad_cleanup}"
             )
         except Exception as exc:
             self.set_progress(0, "Fehler beim Export")
-            messagebox.showerror("Fehler beim Export", str(exc))
+            messagebox.showerror(tr("msg.export_error"), str(exc))
 
 
 def main() -> None:

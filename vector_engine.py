@@ -540,9 +540,9 @@ def filter_small_contours(
     image_size: Tuple[int, int],
     pixel_to_mm: float
 ) -> List[DetectedContour]:
-    if mode == "mm²":
+    if mode in ("mm²", "mm2"):
         return remove_contours_smaller_than_mm2(contours, min_area_mm2, pixel_to_mm)
-    if mode == "% Bildfläche":
+    if mode in ("% Bildfläche", "percent"):
         return remove_contours_smaller_than_percent(contours, min_percent, image_size)
     return contours
 
@@ -585,6 +585,121 @@ def build_bezier_path(points: List[Tuple[float, float]], closed: bool) -> str:
     if closed:
         d.append("Z")
     return " ".join(d)
+
+
+
+def iter_contour_segments(
+    contours: List[DetectedContour],
+    exported_only: bool = True
+) -> List[Tuple[DetectedContour, Tuple[float, float], Tuple[float, float]]]:
+    """Gibt alle Kontursegmente als Einzelsegmente zurück.
+
+    CAD-Hintergrund:
+    Wenn zwei Farbflächen dieselbe Grenze erzeugen, entstehen sonst zwei Linien
+    übereinander bzw. knapp parallel nebeneinander. Für CAD/CAM/Plotter ist das
+    problematisch, daher können diese Segmente anschließend entdoppelt werden.
+    """
+    segments: List[Tuple[DetectedContour, Tuple[float, float], Tuple[float, float]]] = []
+    for contour in contours:
+        if exported_only and not contour.rule.export:
+            continue
+        pts = contour.points
+        if len(pts) < 2:
+            continue
+        limit = len(pts) if contour.closed and len(pts) >= 3 else len(pts) - 1
+        for index in range(limit):
+            a = pts[index]
+            b = pts[(index + 1) % len(pts)]
+            if point_distance(a, b) <= 0.01:
+                continue
+            segments.append((contour, a, b))
+    return segments
+
+
+def _segment_angle_bin(a: Tuple[float, float], b: Tuple[float, float], bin_count: int = 36) -> int:
+    """Orientierung eines Segments, modulo 180 Grad."""
+    angle = math.atan2(b[1] - a[1], b[0] - a[0])
+    if angle < 0:
+        angle += math.pi
+    if angle >= math.pi:
+        angle -= math.pi
+    return int(round(angle / math.pi * bin_count)) % bin_count
+
+
+def _sample_segment_keys(
+    a: Tuple[float, float],
+    b: Tuple[float, float],
+    tolerance_px: float,
+    bin_count: int = 36
+) -> set[Tuple[int, int, int]]:
+    """Rastert ein Segment robust ein."""
+    tol = max(0.25, float(tolerance_px))
+    length = point_distance(a, b)
+    if length <= 0.01:
+        return set()
+    steps = max(2, int(math.ceil(length / max(0.5, tol * 0.5))))
+    angle_bin = _segment_angle_bin(a, b, bin_count=bin_count)
+    keys: set[Tuple[int, int, int]] = set()
+    for i in range(steps + 1):
+        t = i / steps
+        x = a[0] + (b[0] - a[0]) * t
+        y = a[1] + (b[1] - a[1]) * t
+        gx = int(round(x / tol))
+        gy = int(round(y / tol))
+        keys.add((angle_bin, gx, gy))
+    return keys
+
+
+def unique_line_segments_from_contours(
+    contours: List[DetectedContour],
+    tolerance_px: float = 1.25,
+    exported_only: bool = True,
+    match_ratio: float = 0.72
+) -> List[Tuple[ColorRule, Tuple[float, float], Tuple[float, float]]]:
+    """Entfernt doppelte oder fast deckungsgleiche CAD-Liniensegmente.
+
+    tolerance_px:
+        Abstand in Bildpixeln, innerhalb dessen Linien als doppelt gelten.
+        1.0 bis 2.0 ist meist passend für PNG-Konturen.
+    """
+    tol = max(0.25, float(tolerance_px))
+    bin_count = 36
+    occupied: set[Tuple[int, int, int]] = set()
+    result: List[Tuple[ColorRule, Tuple[float, float], Tuple[float, float]]] = []
+    for contour, a, b in iter_contour_segments(contours, exported_only=exported_only):
+        keys = _sample_segment_keys(a, b, tol, bin_count=bin_count)
+        if not keys:
+            continue
+        matched = 0
+        for angle_bin, gx, gy in keys:
+            found = False
+            for db in (-1, 0, 1):
+                nb = (angle_bin + db) % bin_count
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        if (nb, gx + dx, gy + dy) in occupied:
+                            found = True
+                            break
+                    if found:
+                        break
+                if found:
+                    break
+            if found:
+                matched += 1
+        if matched / max(1, len(keys)) >= match_ratio:
+            continue
+        result.append((contour.rule, a, b))
+        for angle_bin, gx, gy in keys:
+            for db in (-1, 0, 1):
+                nb = (angle_bin + db) % bin_count
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        occupied.add((nb, gx + dx, gy + dy))
+    return result
+
+
+def count_export_line_segments(contours: List[DetectedContour]) -> int:
+    return len(iter_contour_segments(contours, exported_only=True))
 
 
 def render_contours_to_mask(
@@ -874,7 +989,9 @@ def export_dxf(
     contours: List[DetectedContour],
     pixel_to_mm: float,
     invert_y: bool = True,
-    dxf_version: str = "R2000"
+    dxf_version: str = "R2000",
+    dedupe_segments: bool = True,
+    dedupe_tolerance_px: float = 1.25
 ) -> None:
     width_px, height_px = image_size
     # Viele Grafikprogramme öffnen neuere DXF-Versionen nicht zuverlässig.
@@ -887,6 +1004,38 @@ def export_dxf(
     msp = doc.modelspace()
 
     existing_layers = set()
+
+    if dedupe_segments:
+        unique_segments = unique_line_segments_from_contours(
+            contours,
+            tolerance_px=dedupe_tolerance_px,
+            exported_only=True
+        )
+
+        for rule, a_px, b_px in unique_segments:
+            layer = rule.layer or rule.name
+            if layer not in existing_layers:
+                if layer not in doc.layers:
+                    doc.layers.new(name=layer)
+                existing_layers.add(layer)
+
+            def convert(point: Tuple[float, float]) -> Tuple[float, float]:
+                x_px, y_px = point
+                x = x_px * pixel_to_mm
+                if invert_y:
+                    y = (height_px - y_px) * pixel_to_mm
+                else:
+                    y = y_px * pixel_to_mm
+                return (x, y)
+
+            msp.add_line(
+                convert(a_px),
+                convert(b_px),
+                dxfattribs={"layer": layer}
+            )
+
+        doc.saveas(output_path)
+        return
 
     for item in contours:
         if not item.rule.export:
