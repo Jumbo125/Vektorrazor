@@ -263,3 +263,4 @@ def tr(key: str, default: str | None = None, **kwargs: Any) -> str:
         return value.format(**kwargs)
     except Exception:
         return value
+

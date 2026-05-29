@@ -5,7 +5,6 @@
 
 """
 Bild-Umfaerber GUI v4.5
-
 ---------------------
 Ein einfaches Tkinter-Tool zum Umfaerben kompletter Farbbereiche in Bildern.
 
@@ -1445,3 +1444,4 @@ class RecolorApp(tk.Tk):
 if __name__ == "__main__":
     app = RecolorApp()
     app.mainloop()
+
