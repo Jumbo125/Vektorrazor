@@ -5,6 +5,7 @@
 
 """
 Bild-Umfaerber GUI v4.5
+
 ---------------------
 Ein einfaches Tkinter-Tool zum Umfaerben kompletter Farbbereiche in Bildern.
 
