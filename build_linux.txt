@@ -1,0 +1,5 @@
+pyinstaller --onefile --windowed --clean \
+  --name Vektorrazor \
+  --add-data "assets/vektorrazor.ico:assets" \
+  --add-data "assets/vektorrazor_icon.png:assets" \
+  main.py

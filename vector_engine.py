@@ -224,6 +224,38 @@ def make_color_mask(image_rgb: np.ndarray, rgb: Tuple[int, int, int], tolerance:
     return mask
 
 
+def preprocess_vector_image(
+    image_rgb: np.ndarray,
+    enabled: bool = False,
+    blur_radius: float = 0.0,
+    edge_smoothing: int = 0,
+) -> np.ndarray:
+    if not enabled:
+        return image_rgb
+
+    result = image_rgb.copy()
+    blur = max(0.0, float(blur_radius))
+    if blur > 0.0:
+        sigma = min(3.0, blur)
+        kernel = max(3, int(round(sigma * 4.0)) | 1)
+        result = cv2.GaussianBlur(result, (kernel, kernel), sigmaX=sigma, sigmaY=sigma)
+
+    calm = max(0, min(5, int(edge_smoothing)))
+    if calm > 0:
+        kernel = max(3, calm * 2 + 1)
+        result = cv2.medianBlur(result, kernel)
+
+    return result
+
+
+def upscale_vector_image(image_rgb: np.ndarray, scale: int = 1) -> np.ndarray:
+    factor = max(1, min(3, int(scale)))
+    if factor <= 1:
+        return image_rgb
+    height, width = image_rgb.shape[:2]
+    return cv2.resize(image_rgb, (width * factor, height * factor), interpolation=cv2.INTER_CUBIC)
+
+
 def remove_small_components(mask: np.ndarray, min_area: int) -> np.ndarray:
     if min_area <= 0:
         return mask
@@ -237,6 +269,31 @@ def remove_small_components(mask: np.ndarray, min_area: int) -> np.ndarray:
             cleaned[labels == label_id] = 255
 
     return cleaned
+
+
+def calm_mask_edges(
+    mask: np.ndarray,
+    edge_smoothing: int = 0,
+    min_noise_area: int = 0,
+) -> np.ndarray:
+    result = mask
+
+    noise_area = max(0, int(min_noise_area))
+    if noise_area > 0:
+        result = remove_small_components(result, noise_area)
+
+    calm = max(0, min(5, int(edge_smoothing)))
+    if calm <= 0:
+        return result
+
+    kernel_size = calm * 2 + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    result = cv2.morphologyEx(result, cv2.MORPH_CLOSE, kernel)
+    if calm >= 2:
+        result = cv2.morphologyEx(result, cv2.MORPH_OPEN, kernel)
+    result = cv2.GaussianBlur(result, (kernel_size, kernel_size), sigmaX=max(0.5, calm * 0.35))
+    _, result = cv2.threshold(result, 127, 255, cv2.THRESH_BINARY)
+    return result.astype(np.uint8)
 
 
 def merge_nearby_mask_lines(mask: np.ndarray, merge_distance_px: float) -> np.ndarray:
@@ -451,6 +508,58 @@ def smooth_closed_points(
     return smoothed
 
 
+def smooth_open_points(
+    points: List[Tuple[float, float]],
+    iterations: int
+) -> List[Tuple[float, float]]:
+    if iterations <= 0 or len(points) < 3:
+        return points
+
+    smoothed = points
+    for _ in range(iterations):
+        next_points = [smoothed[0]]
+        for index in range(len(smoothed) - 1):
+            point = smoothed[index]
+            next_point = smoothed[index + 1]
+            q = (
+                point[0] * 0.75 + next_point[0] * 0.25,
+                point[1] * 0.75 + next_point[1] * 0.25
+            )
+            r = (
+                point[0] * 0.25 + next_point[0] * 0.75,
+                point[1] * 0.25 + next_point[1] * 0.75
+            )
+            next_points.extend((q, r))
+        next_points.append(smoothed[-1])
+        smoothed = next_points
+
+    return smoothed
+
+
+def smooth_contours(
+    contours: List[DetectedContour],
+    iterations: int,
+) -> List[DetectedContour]:
+    if iterations <= 0:
+        return contours
+
+    result: List[DetectedContour] = []
+    for contour in contours:
+        if contour.closed:
+            points = smooth_closed_points(contour.points, iterations)
+        else:
+            points = smooth_open_points(contour.points, iterations)
+        result.append(
+            DetectedContour(
+                rule=contour.rule,
+                points=points,
+                area=contour.area,
+                closed=contour.closed,
+            )
+        )
+    return result
+
+
 def approximate_points(
     points: List[Tuple[float, float]],
     epsilon: float,
@@ -463,6 +572,237 @@ def approximate_points(
     approximated = cv2.approxPolyDP(contour, epsilon, closed=closed)
     pts = approximated.reshape(-1, 2)
     return [(float(x), float(y)) for x, y in pts]
+
+
+def _point_line_distance(
+    point: Tuple[float, float],
+    start: Tuple[float, float],
+    end: Tuple[float, float],
+) -> float:
+    length = point_distance(start, end)
+    if length <= 1e-9:
+        return point_distance(point, start)
+    return abs(
+        (end[0] - start[0]) * (start[1] - point[1])
+        - (start[0] - point[0]) * (end[1] - start[1])
+    ) / length
+
+
+def _turn_angle_deg(
+    previous: Tuple[float, float],
+    current: Tuple[float, float],
+    next_point: Tuple[float, float],
+) -> float:
+    ax = current[0] - previous[0]
+    ay = current[1] - previous[1]
+    bx = next_point[0] - current[0]
+    by = next_point[1] - current[1]
+    la = math.hypot(ax, ay)
+    lb = math.hypot(bx, by)
+    if la <= 1e-9 or lb <= 1e-9:
+        return 0.0
+    dot = max(-1.0, min(1.0, (ax * bx + ay * by) / (la * lb)))
+    return math.degrees(math.acos(dot))
+
+
+def _dedupe_consecutive_points(points: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    cleaned: List[Tuple[float, float]] = []
+    for point in points:
+        if not cleaned or point_distance(cleaned[-1], point) > 0.01:
+            cleaned.append(point)
+    if len(cleaned) > 1 and point_distance(cleaned[0], cleaned[-1]) <= 0.01:
+        cleaned.pop()
+    return cleaned
+
+
+def _split_smart_sections(
+    points: List[Tuple[float, float]],
+    protected: set[int],
+    closed: bool,
+) -> List[List[int]]:
+    count = len(points)
+    if count == 0:
+        return []
+
+    if not protected:
+        return [list(range(count))]
+
+    sections: List[List[int]] = []
+    ordered = sorted(protected)
+    if closed:
+        for pos, start in enumerate(ordered):
+            end = ordered[(pos + 1) % len(ordered)]
+            section = [start]
+            idx = (start + 1) % count
+            while idx != end:
+                section.append(idx)
+                idx = (idx + 1) % count
+            section.append(end)
+            if len(section) >= 2:
+                sections.append(section)
+        return sections
+
+    boundaries = sorted({0, count - 1, *protected})
+    for start, end in zip(boundaries, boundaries[1:]):
+        if end > start:
+            sections.append(list(range(start, end + 1)))
+    return sections
+
+
+def _smooth_section_points(
+    section_points: List[Tuple[float, float]],
+    strength: int,
+) -> List[Tuple[float, float]]:
+    if strength <= 0 or len(section_points) < 4:
+        return section_points
+
+    smoothed = section_points[:]
+    for _ in range(max(0, min(5, int(strength)))):
+        next_points = [smoothed[0]]
+        for index in range(1, len(smoothed) - 1):
+            prev_point = smoothed[index - 1]
+            point = smoothed[index]
+            next_point = smoothed[index + 1]
+            next_points.append(
+                (
+                    point[0] * 0.50 + (prev_point[0] + next_point[0]) * 0.25,
+                    point[1] * 0.50 + (prev_point[1] + next_point[1]) * 0.25,
+                )
+            )
+        next_points.append(smoothed[-1])
+        smoothed = next_points
+    return smoothed
+
+
+def _section_is_straight(
+    section_points: List[Tuple[float, float]],
+    line_tolerance_px: float,
+) -> bool:
+    if len(section_points) <= 2:
+        return True
+    start = section_points[0]
+    end = section_points[-1]
+    if point_distance(start, end) <= 1e-9:
+        return False
+    max_deviation = max(_point_line_distance(point, start, end) for point in section_points[1:-1])
+    return max_deviation <= max(0.0, float(line_tolerance_px))
+
+
+def _section_has_continuous_direction_change(section_points: List[Tuple[float, float]]) -> bool:
+    if len(section_points) < 4:
+        return False
+
+    signed_turns: List[float] = []
+    for index in range(1, len(section_points) - 1):
+        prev_point = section_points[index - 1]
+        point = section_points[index]
+        next_point = section_points[index + 1]
+        ax = point[0] - prev_point[0]
+        ay = point[1] - prev_point[1]
+        bx = next_point[0] - point[0]
+        by = next_point[1] - point[1]
+        la = math.hypot(ax, ay)
+        lb = math.hypot(bx, by)
+        if la <= 1e-9 or lb <= 1e-9:
+            continue
+        cross = ax * by - ay * bx
+        dot = ax * bx + ay * by
+        turn = math.degrees(math.atan2(cross, dot))
+        if abs(turn) >= 2.0:
+            signed_turns.append(turn)
+
+    if len(signed_turns) < 2:
+        return False
+
+    positive = sum(1 for turn in signed_turns if turn > 0)
+    negative = sum(1 for turn in signed_turns if turn < 0)
+    dominant = max(positive, negative)
+    total_turn = sum(abs(turn) for turn in signed_turns)
+    return dominant >= 2 and dominant / len(signed_turns) >= 0.60 and total_turn >= 8.0
+
+
+def smart_smooth_contour(
+    points: List[Tuple[float, float]],
+    closed: bool,
+    corner_angle_deg: float,
+    line_tolerance_px: float,
+    curve_smoothing_strength: int,
+) -> List[Tuple[float, float]]:
+    """Preserve CAD corners/lines and smooth only curved or noisy sections."""
+    if len(points) < 4 or curve_smoothing_strength <= 0:
+        return points
+
+    pts = _dedupe_consecutive_points([(float(x), float(y)) for x, y in points])
+    count = len(pts)
+    if count < 4:
+        return pts
+
+    protected: set[int] = set()
+    threshold = max(1.0, min(175.0, float(corner_angle_deg)))
+    start = 0 if closed else 1
+    end = count if closed else count - 1
+    for index in range(start, end):
+        prev_point = pts[(index - 1) % count]
+        point = pts[index]
+        next_point = pts[(index + 1) % count]
+        if _turn_angle_deg(prev_point, point, next_point) >= threshold:
+            protected.add(index)
+
+    if closed and not protected:
+        return smooth_closed_points(pts, curve_smoothing_strength)
+
+    sections = _split_smart_sections(pts, protected, closed=closed)
+    if not sections:
+        return pts
+
+    result: List[Tuple[float, float]] = []
+    for section in sections:
+        section_points = [pts[index] for index in section]
+        if len(section_points) <= 2 or _section_is_straight(section_points, line_tolerance_px):
+            processed = [section_points[0], section_points[-1]]
+        elif _section_has_continuous_direction_change(section_points):
+            processed = _smooth_section_points(section_points, curve_smoothing_strength)
+        else:
+            processed = section_points
+
+        if result and processed and point_distance(result[-1], processed[0]) <= 0.01:
+            result.extend(processed[1:])
+        else:
+            result.extend(processed)
+
+    return _dedupe_consecutive_points(result)
+
+
+def smart_smooth_contours(
+    contours: List[DetectedContour],
+    corner_angle_deg: float,
+    line_tolerance_px: float,
+    curve_smoothing_strength: int,
+) -> List[DetectedContour]:
+    if curve_smoothing_strength <= 0:
+        return contours
+
+    smoothed: List[DetectedContour] = []
+    for contour in contours:
+        if len(contour.points) < 4:
+            smoothed.append(contour)
+            continue
+        new_points = smart_smooth_contour(
+            contour.points,
+            closed=contour.closed,
+            corner_angle_deg=corner_angle_deg,
+            line_tolerance_px=line_tolerance_px,
+            curve_smoothing_strength=curve_smoothing_strength,
+        )
+        smoothed.append(
+            DetectedContour(
+                rule=contour.rule,
+                points=new_points,
+                area=contour.area,
+                closed=contour.closed,
+            )
+        )
+    return smoothed
 
 
 def is_closed_path(points: List[Tuple[float, float]]) -> bool:
@@ -498,6 +838,79 @@ def contour_filter_area_px(contour: DetectedContour) -> float:
     xs = [point[0] for point in contour.points]
     ys = [point[1] for point in contour.points]
     return (max(xs) - min(xs)) * (max(ys) - min(ys))
+
+
+def contour_bbox(contour: DetectedContour) -> Tuple[float, float, float, float]:
+    if not contour.points:
+        return (0.0, 0.0, 0.0, 0.0)
+    xs = [point[0] for point in contour.points]
+    ys = [point[1] for point in contour.points]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _bboxes_touch(
+    a: Tuple[float, float, float, float],
+    b: Tuple[float, float, float, float],
+    tolerance_px: float,
+) -> bool:
+    tol = max(0.0, float(tolerance_px))
+    return not (
+        a[2] + tol < b[0]
+        or b[2] + tol < a[0]
+        or a[3] + tol < b[1]
+        or b[3] + tol < a[1]
+    )
+
+
+def group_connected_contours(
+    contours: List[DetectedContour],
+    tolerance_px: float = 2.0,
+) -> List[List[DetectedContour]]:
+    exported = [contour for contour in contours if contour.rule.export and contour.points]
+    count = len(exported)
+    if count <= 1:
+        return [exported] if exported else []
+
+    bboxes = [contour_bbox(contour) for contour in exported]
+    visited = [False] * count
+    groups: List[List[DetectedContour]] = []
+    for start in range(count):
+        if visited[start]:
+            continue
+        stack = [start]
+        visited[start] = True
+        group: List[DetectedContour] = []
+        while stack:
+            current = stack.pop()
+            group.append(exported[current])
+            for candidate in range(count):
+                if visited[candidate]:
+                    continue
+                if _bboxes_touch(bboxes[current], bboxes[candidate], tolerance_px):
+                    visited[candidate] = True
+                    stack.append(candidate)
+        groups.append(group)
+    return groups
+
+
+def sanitize_dxf_layer_name(name: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in "_-$" else "_" for ch in (name or "Layer"))
+    cleaned = cleaned.strip("_") or "Layer"
+    return cleaned[:240]
+
+
+def color_layer_for_rule(rule: ColorRule, force_color_layers: bool = True) -> str:
+    base = sanitize_dxf_layer_name(rule.layer or rule.name)
+    if not force_color_layers:
+        return base
+    rgb_suffix = f"RGB_{int(rule.rgb[0]):03d}_{int(rule.rgb[1]):03d}_{int(rule.rgb[2]):03d}"
+    if rgb_suffix in base:
+        return base
+    return sanitize_dxf_layer_name(f"{base}_{rgb_suffix}")
+
+
+def dxf_layer_for_rule(rule: ColorRule, force_color_layers: bool = True) -> str:
+    return color_layer_for_rule(rule, force_color_layers=force_color_layers)
 
 
 def remove_contours_smaller_than_mm2(
@@ -664,37 +1077,49 @@ def unique_line_segments_from_contours(
     """
     tol = max(0.25, float(tolerance_px))
     bin_count = 36
-    occupied: set[Tuple[int, int, int]] = set()
+    occupied: dict[Tuple[int, int, int], set[int]] = {}
     result: List[Tuple[ColorRule, Tuple[float, float], Tuple[float, float]]] = []
-    for contour, a, b in iter_contour_segments(contours, exported_only=exported_only):
-        keys = _sample_segment_keys(a, b, tol, bin_count=bin_count)
-        if not keys:
+    for contour_index, contour in enumerate(contours):
+        if exported_only and not contour.rule.export:
             continue
-        matched = 0
-        for angle_bin, gx, gy in keys:
-            found = False
-            for db in (-1, 0, 1):
-                nb = (angle_bin + db) % bin_count
-                for dx in (-1, 0, 1):
-                    for dy in (-1, 0, 1):
-                        if (nb, gx + dx, gy + dy) in occupied:
-                            found = True
+        pts = contour.points
+        if len(pts) < 2:
+            continue
+        limit = len(pts) if contour.closed and len(pts) >= 3 else len(pts) - 1
+        for point_index in range(limit):
+            a = pts[point_index]
+            b = pts[(point_index + 1) % len(pts)]
+            if point_distance(a, b) <= 0.01:
+                continue
+            keys = _sample_segment_keys(a, b, tol, bin_count=bin_count)
+            if not keys:
+                continue
+            matched = 0
+            for angle_bin, gx, gy in keys:
+                found = False
+                for db in (-1, 0, 1):
+                    nb = (angle_bin + db) % bin_count
+                    for dx in (-1, 0, 1):
+                        for dy in (-1, 0, 1):
+                            owners = occupied.get((nb, gx + dx, gy + dy), set())
+                            if any(owner != contour_index for owner in owners):
+                                found = True
+                                break
+                        if found:
                             break
                     if found:
                         break
                 if found:
-                    break
-            if found:
-                matched += 1
-        if matched / max(1, len(keys)) >= match_ratio:
-            continue
-        result.append((contour.rule, a, b))
-        for angle_bin, gx, gy in keys:
-            for db in (-1, 0, 1):
-                nb = (angle_bin + db) % bin_count
-                for dx in (-1, 0, 1):
-                    for dy in (-1, 0, 1):
-                        occupied.add((nb, gx + dx, gy + dy))
+                    matched += 1
+            if matched / max(1, len(keys)) >= match_ratio:
+                continue
+            result.append((contour.rule, a, b))
+            for angle_bin, gx, gy in keys:
+                for db in (-1, 0, 1):
+                    nb = (angle_bin + db) % bin_count
+                    for dx in (-1, 0, 1):
+                        for dy in (-1, 0, 1):
+                            occupied.setdefault((nb, gx + dx, gy + dy), set()).add(contour_index)
     return result
 
 
@@ -764,10 +1189,13 @@ def find_contours_for_rule(
     rule: ColorRule,
     closed_paths_only: bool = False,
     remove_loose_points: bool = False,
-    smooth_iterations: int = 0
+    smooth_iterations: int = 0,
+    mask_edge_smoothing: int = 0,
+    mask_noise_area: int = 0,
 ) -> List[DetectedContour]:
     mask = make_color_mask(image_rgb, rule.rgb, rule.tolerance)
     mask = remove_small_components(mask, rule.min_area)
+    mask = calm_mask_edges(mask, mask_edge_smoothing, mask_noise_area)
 
     contours, _hierarchy = cv2.findContours(
         mask,
@@ -811,11 +1239,14 @@ def find_centerlines_for_rule(
     image_rgb: np.ndarray,
     rule: ColorRule,
     remove_loose_points: bool = False,
-    merge_distance_px: float = 0.0
+    merge_distance_px: float = 0.0,
+    mask_edge_smoothing: int = 0,
+    mask_noise_area: int = 0,
 ) -> List[DetectedContour]:
     mask = make_color_mask(image_rgb, rule.rgb, rule.tolerance)
     mask = merge_nearby_mask_lines(mask, merge_distance_px)
     mask = remove_small_components(mask, rule.min_area)
+    mask = calm_mask_edges(mask, mask_edge_smoothing, mask_noise_area)
     skeleton = zhang_suen_thinning(mask)
     paths = trace_skeleton_paths(skeleton)
 
@@ -853,38 +1284,86 @@ def detect_all_contours(
     smooth_iterations: int = 0,
     centerline_mode: bool = False,
     centerline_merge_px: float = 0.0,
+    preprocess_enabled: bool = False,
+    preprocess_blur: float = 0.0,
+    preprocess_edge_smoothing: int = 0,
+    preprocess_noise_area: int = 0,
+    internal_scale: int = 1,
     progress_callback=None
 ) -> List[DetectedContour]:
     all_contours: List[DetectedContour] = []
+    scale = max(1, min(3, int(internal_scale)))
+    work_image = preprocess_vector_image(
+        image_rgb,
+        enabled=preprocess_enabled,
+        blur_radius=preprocess_blur,
+        edge_smoothing=preprocess_edge_smoothing,
+    )
+    work_image = upscale_vector_image(work_image, scale)
+    area_scale = scale * scale
+    scaled_rules = [
+        ColorRule(
+            name=rule.name,
+            rgb=rule.rgb,
+            tolerance=rule.tolerance,
+            layer=rule.layer,
+            export=rule.export,
+            min_area=max(1, int(round(rule.min_area * area_scale))),
+            epsilon=max(0.0, float(rule.epsilon) * scale),
+        )
+        for rule in rules
+    ]
+    original_rule_by_scaled_id = {
+        id(scaled_rule): original_rule
+        for scaled_rule, original_rule in zip(scaled_rules, rules)
+    }
+    mask_noise_area = max(0, int(round(preprocess_noise_area * area_scale))) if preprocess_enabled else 0
+    mask_edge_smoothing = max(0, int(preprocess_edge_smoothing)) if preprocess_enabled else 0
+    merge_px = centerline_merge_px * scale
     total_rules = max(1, len(rules))
-    for index, rule in enumerate(rules):
+    for index, rule in enumerate(scaled_rules):
         if progress_callback is not None:
             progress_callback(index / total_rules)
 
         if centerline_mode:
             all_contours.extend(
                 find_centerlines_for_rule(
-                    image_rgb,
+                    work_image,
                     rule,
                     remove_loose_points=remove_loose_points,
-                    merge_distance_px=centerline_merge_px
+                    merge_distance_px=merge_px,
+                    mask_edge_smoothing=mask_edge_smoothing,
+                    mask_noise_area=mask_noise_area,
                 )
             )
         else:
             all_contours.extend(
                 find_contours_for_rule(
-                    image_rgb,
+                    work_image,
                     rule,
                     closed_paths_only=closed_paths_only,
                     remove_loose_points=remove_loose_points,
-                    smooth_iterations=smooth_iterations
+                    smooth_iterations=smooth_iterations,
+                    mask_edge_smoothing=mask_edge_smoothing,
+                    mask_noise_area=mask_noise_area,
                 )
             )
 
         if progress_callback is not None:
             progress_callback((index + 1) / total_rules)
 
-    return all_contours
+    restored: List[DetectedContour] = []
+    for contour in all_contours:
+        original_rule = original_rule_by_scaled_id.get(id(contour.rule), contour.rule)
+        restored.append(
+            DetectedContour(
+                rule=original_rule,
+                points=[(x / scale, y / scale) for x, y in contour.points],
+                area=contour.area / area_scale,
+                closed=contour.closed,
+            )
+        )
+    return restored
 
 
 def export_svg(
@@ -893,7 +1372,9 @@ def export_svg(
     contours: List[DetectedContour],
     pixel_to_mm: float,
     fill_closed_shapes: bool = False,
-    use_bezier: bool = False
+    use_bezier: bool = False,
+    group_connected_paths: bool = False,
+    force_color_layers: bool = False
 ) -> None:
     width_px, height_px = image_size
     width_mm = width_px * pixel_to_mm
@@ -918,7 +1399,7 @@ def export_svg(
         for item in contours:
             if not item.rule.export:
                 continue
-            layer = item.rule.layer or item.rule.name
+            layer = color_layer_for_rule(item.rule, force_color_layers=force_color_layers)
             if layer not in groups:
                 groups[layer] = dwg.g(id=layer)
                 dwg.add(groups[layer])
@@ -929,7 +1410,7 @@ def export_svg(
             if item.closed and len(scaled) >= 3:
                 layer_paths.setdefault(layer, []).append(path_data)
                 layer_colors[layer] = rgb_to_hex(item.rule.rgb)
-            else:
+            elif not group_connected_paths:
                 groups[layer].add(
                     dwg.path(
                         d=path_data,
@@ -939,17 +1420,70 @@ def export_svg(
                     )
                 )
 
-        for layer, parts in layer_paths.items():
-            groups[layer].add(
-                dwg.path(
-                    d=" ".join(parts),
-                    fill=layer_colors.get(layer, "#000000"),
-                    stroke=layer_colors.get(layer, "#000000"),
-                    stroke_width=max(0.05, pixel_to_mm),
-                    **{"fill-rule": "evenodd"}
+        if group_connected_paths:
+            for group_index, group_contours in enumerate(group_connected_contours(contours)):
+                parts_by_layer: Dict[str, list[str]] = {}
+                colors_by_layer: Dict[str, str] = {}
+                for item in group_contours:
+                    layer = color_layer_for_rule(item.rule, force_color_layers=force_color_layers)
+                    scaled = [(x * pixel_to_mm, y * pixel_to_mm) for x, y in item.points]
+                    if not scaled:
+                        continue
+                    path_data = build_bezier_path(scaled, item.closed) if use_bezier else build_polyline_path(scaled, item.closed)
+                    parts_by_layer.setdefault(layer, []).append(path_data)
+                    colors_by_layer[layer] = rgb_to_hex(item.rule.rgb)
+                for layer, parts in parts_by_layer.items():
+                    if layer not in groups:
+                        groups[layer] = dwg.g(id=layer)
+                        dwg.add(groups[layer])
+                    object_group = dwg.g(id=f"{layer}_object_{group_index + 1}")
+                    object_group.add(
+                        dwg.path(
+                            d=" ".join(parts),
+                            fill=colors_by_layer.get(layer, "#000000"),
+                            stroke=colors_by_layer.get(layer, "#000000"),
+                            stroke_width=max(0.05, pixel_to_mm),
+                            **{"fill-rule": "evenodd"}
+                        )
+                    )
+                    groups[layer].add(object_group)
+        else:
+            for layer, parts in layer_paths.items():
+                groups[layer].add(
+                    dwg.path(
+                        d=" ".join(parts),
+                        fill=layer_colors.get(layer, "#000000"),
+                        stroke=layer_colors.get(layer, "#000000"),
+                        stroke_width=max(0.05, pixel_to_mm),
+                        **{"fill-rule": "evenodd"}
+                    )
                 )
-            )
 
+        dwg.save()
+        return
+
+    if group_connected_paths:
+        for group_index, group_contours in enumerate(group_connected_contours(contours)):
+            layer_names = sorted({color_layer_for_rule(item.rule, force_color_layers=force_color_layers) for item in group_contours})
+            layer = layer_names[0] if len(layer_names) == 1 else "CONNECTED_OBJECTS"
+            if layer not in groups:
+                groups[layer] = dwg.g(id=layer)
+                dwg.add(groups[layer])
+            object_group = dwg.g(id=f"{layer}_object_{group_index + 1}")
+            for item in group_contours:
+                scaled = [(x * pixel_to_mm, y * pixel_to_mm) for x, y in item.points]
+                if not scaled:
+                    continue
+                path_data = build_bezier_path(scaled, item.closed) if use_bezier else build_polyline_path(scaled, item.closed)
+                object_group.add(
+                    dwg.path(
+                        d=path_data,
+                        fill="none",
+                        stroke=rgb_to_hex(item.rule.rgb),
+                        stroke_width=max(0.05, pixel_to_mm)
+                    )
+                )
+            groups[layer].add(object_group)
         dwg.save()
         return
 
@@ -957,7 +1491,7 @@ def export_svg(
         if not item.rule.export:
             continue
 
-        layer = item.rule.layer or item.rule.name
+        layer = color_layer_for_rule(item.rule, force_color_layers=force_color_layers)
         if layer not in groups:
             groups[layer] = dwg.g(id=layer)
             dwg.add(groups[layer])
@@ -991,7 +1525,9 @@ def export_dxf(
     invert_y: bool = True,
     dxf_version: str = "R2000",
     dedupe_segments: bool = True,
-    dedupe_tolerance_px: float = 1.25
+    dedupe_tolerance_px: float = 1.25,
+    force_color_layers: bool = True,
+    object_layers: bool = False
 ) -> None:
     width_px, height_px = image_size
     # Viele Grafikprogramme öffnen neuere DXF-Versionen nicht zuverlässig.
@@ -1005,7 +1541,7 @@ def export_dxf(
 
     existing_layers = set()
 
-    if dedupe_segments:
+    if dedupe_segments and not object_layers:
         unique_segments = unique_line_segments_from_contours(
             contours,
             tolerance_px=dedupe_tolerance_px,
@@ -1013,7 +1549,7 @@ def export_dxf(
         )
 
         for rule, a_px, b_px in unique_segments:
-            layer = rule.layer or rule.name
+            layer = dxf_layer_for_rule(rule, force_color_layers=force_color_layers)
             if layer not in existing_layers:
                 if layer not in doc.layers:
                     doc.layers.new(name=layer)
@@ -1037,11 +1573,15 @@ def export_dxf(
         doc.saveas(output_path)
         return
 
+    object_index = 0
     for item in contours:
         if not item.rule.export:
             continue
 
-        layer = item.rule.layer or item.rule.name
+        layer = dxf_layer_for_rule(item.rule, force_color_layers=force_color_layers)
+        if object_layers:
+            object_index += 1
+            layer = sanitize_dxf_layer_name(f"{layer}_OBJ_{object_index:04d}")
         if layer not in existing_layers:
             if layer not in doc.layers:
                 doc.layers.new(name=layer)

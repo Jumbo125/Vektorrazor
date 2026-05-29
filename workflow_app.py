@@ -77,6 +77,7 @@ DXF_COMPATIBILITY_KEYS = list(DXF_COMPATIBILITY_PRESETS.keys())
 VECTOR_MODE_KEYS = ["area", "centerline"]
 PREVIEW_MODE_KEYS = ["object", "contour", "mask"]
 CLEANUP_MODE_KEYS = ["off", "mm2", "percent"]
+INTERNAL_SCALE_KEYS = ["1", "2", "3"]
 
 
 DXF_VERSION_CHOICES = {
@@ -330,6 +331,9 @@ class WorkflowApp(tk.Tk):
         self.centerline_merge_px_var = tk.StringVar(value="0")
         self.closed_paths_only_var = tk.BooleanVar(value=True)
         self.fill_closed_shapes_var = tk.BooleanVar(value=False)
+        self.group_connected_paths_var = tk.BooleanVar(value=True)
+        self.force_color_layers_var = tk.BooleanVar(value=True)
+        self.object_layers_dxf_var = tk.BooleanVar(value=False)
         self.preview_mode_var = tk.StringVar(value="object")
         self.preview_mode_display_var = tk.StringVar()
         self.use_bezier_var = tk.BooleanVar(value=False)
@@ -338,6 +342,17 @@ class WorkflowApp(tk.Tk):
         self.remove_loose_points_var = tk.BooleanVar(value=False)
         self.smooth_contours_var = tk.BooleanVar(value=True)
         self.smooth_strength_var = tk.StringVar(value="2")
+        self.global_epsilon_var = tk.StringVar(value="1.2")
+        self.preprocess_vector_var = tk.BooleanVar(value=False)
+        self.preprocess_blur_var = tk.DoubleVar(value=0.8)
+        self.preprocess_edge_var = tk.IntVar(value=1)
+        self.preprocess_noise_var = tk.IntVar(value=3)
+        self.internal_scale_var = tk.StringVar(value="2")
+        self.internal_scale_display_var = tk.StringVar()
+        self.smart_smoothing_var = tk.BooleanVar(value=False)
+        self.smart_corner_angle_var = tk.StringVar(value="45")
+        self.smart_line_tolerance_var = tk.StringVar(value="1.0")
+        self.smart_curve_strength_var = tk.StringVar(value="2")
         self.cleanup_mode_var = tk.StringVar(value="percent")
         self.cleanup_mode_display_var = tk.StringVar()
         self.min_object_area_mm2_var = tk.StringVar(value="0")
@@ -387,6 +402,9 @@ class WorkflowApp(tk.Tk):
     def _cleanup_label(self, key: str) -> str:
         return tr(f"cleanup.{key}")
 
+    def _internal_scale_label(self, key: str) -> str:
+        return tr(f"internal_scale.{key}x")
+
     def _refresh_combobox_labels(self) -> None:
         if hasattr(self, "language_box"):
             languages = i18n.available_languages()
@@ -409,6 +427,9 @@ class WorkflowApp(tk.Tk):
         if hasattr(self, "cleanup_mode_box"):
             self.cleanup_mode_box.configure(values=[self._cleanup_label(key) for key in CLEANUP_MODE_KEYS])
             self.cleanup_mode_display_var.set(self._cleanup_label(self.cleanup_mode_var.get()))
+        if hasattr(self, "internal_scale_box"):
+            self.internal_scale_box.configure(values=[self._internal_scale_label(key) for key in INTERNAL_SCALE_KEYS])
+            self.internal_scale_display_var.set(self._internal_scale_label(self.internal_scale_var.get()))
 
     def refresh_ui_texts(self) -> None:
         self.title(tr("app.title"))
@@ -424,6 +445,8 @@ class WorkflowApp(tk.Tk):
                 pass
         self._refresh_combobox_labels()
         self.on_dxf_compatibility_changed()
+        if hasattr(self, "vector_colors_window"):
+            self.vector_colors_window.title(tr("step2.edit_colors"))
         self.show_step(self.current_step)
 
     def _register_existing_texts(self) -> None:
@@ -481,6 +504,8 @@ class WorkflowApp(tk.Tk):
             "3  Export DXF / SVG": "step2.export",
             "Auto-Werte ist optional und rechnet selbst eine Vorschau. Danach Vorschau prüfen oder direkt exportieren.": "step2.actions_hint",
             "Farben / Layer": "step2.colors_layer",
+            "Farben / Layer bearbeiten": "step2.edit_colors",
+            "Farben aus Bild erkennen": "step2.detect_colors_from_image",
             "Dynamische Farbtabelle": "step2.dynamic_table",
             "+ Farbe": "step2.add_color",
             "Profil:": "step2.profile",
@@ -490,12 +515,29 @@ class WorkflowApp(tk.Tk):
             "Linien zusammenführen px": "step2.merge_lines",
             "Nur geschlossene Pfade": "step2.closed_only",
             "SVG-Flächen füllen (Export)": "step2.fill_svg",
+            "Zusammenhängende Pfade gruppieren (SVG)": "step2.group_connected_paths",
+            "Export-Layer pro Farbe": "step2.force_color_layers",
+            "Objekte in Layer erstellen (DXF)": "step2.object_layers_dxf",
             "Bezier für SVG": "step2.bezier_svg",
             "Doppelte Linien entfernen (CAD)": "step2.dedupe",
             "Doppellinien-Toleranz px": "step2.dedupe_tolerance",
             "Vorschau-Modus": "step2.preview_mode",
             "Lose Ankerpunkte entfernen": "step2.loose_points",
             "Rundungen glätten": "step2.smooth",
+            "Punktreduktion / Epsilon px": "step2.global_epsilon",
+            "Auf alle Farben anwenden": "step2.apply_all_colors",
+            "Vorverarbeitung aktiv": "step2.preprocess_enabled",
+            "Weichzeichnen / Blur": "step2.preprocess_blur",
+            "Kanten beruhigen": "step2.preprocess_edges",
+            "Mindeststörung px": "step2.preprocess_noise",
+            "Interne Skalierung": "step2.internal_scale",
+            "Vorschau aktualisieren": "step2.refresh_preview",
+            "Smart CAD Smoothing": "step2.smart_smoothing",
+            "Ecken schützen ab Grad": "step2.smart_corner_angle",
+            "Ecken schützen °": "step2.smart_corner_angle",
+            "Geraden-Toleranz px": "step2.smart_line_tolerance",
+            "Gerade Linien Toleranz px": "step2.smart_line_tolerance",
+            "Kurven-Glättung": "step2.smart_curve_strength",
             "Kleine Objekte löschen": "step2.delete_small",
             "% Bildfläche": "step2.percent_area",
             "Pfad-Auswahl": "step2.path_selection",
@@ -508,6 +550,7 @@ class WorkflowApp(tk.Tk):
             "Zwischen-PNG": "canvas.step2_original",
             "Vektor-Vorschau": "canvas.vector_preview",
             "wählen": "button.choose",
+            "Schließen": "button.close",
             "Tol.": "label.tolerance_short",
         }
 
@@ -685,6 +728,8 @@ class WorkflowApp(tk.Tk):
         preview_panes.grid(row=0, column=0, sticky="nsew")
         self.step1_original_canvas = recolor.ZoomImageCanvas(preview_panes, "Original", self.on_pick_color)
         self.step1_edited_canvas = recolor.ZoomImageCanvas(preview_panes, "Bearbeitet / technische Zwischenstufe")
+        self.step1_original_canvas.canvas.bind("<Enter>", lambda _event: self.update_step1_picker_cursor(), add="+")
+        self.step1_original_canvas.canvas.bind("<Leave>", lambda _event: self.step1_original_canvas.canvas.configure(cursor=""), add="+")
         preview_panes.add(self.step1_original_canvas, weight=1)
         preview_panes.add(self.step1_edited_canvas, weight=1)
 
@@ -917,29 +962,19 @@ class WorkflowApp(tk.Tk):
         settings = ttk.Frame(panes)
         settings.columnconfigure(0, weight=1)
         settings.rowconfigure(1, weight=1)
-        ttk.Label(settings, text="Farben / Layer", font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
-        table_box = ttk.LabelFrame(settings, text="Dynamische Farbtabelle", padding=4)
-        table_box.grid(row=1, column=0, sticky="nsew", pady=(6, 6))
-        table_box.columnconfigure(0, weight=1)
-        table_box.rowconfigure(1, weight=1)
-        header = ttk.Frame(table_box)
-        header.grid(row=0, column=0, sticky="ew")
-        for col, text in enumerate(["Name", "RGB", "Tol.", "Layer", "Export", "Min.", "Epsilon", ""]):
-            ttk.Label(header, text=text, width=[14,13,7,14,7,7,7,3][col]).grid(row=0, column=col, padx=2, sticky="w")
-        self.vector_rows_scroll = recolor.ScrollableFrame(table_box, height=270)
-        self.vector_rows_scroll.grid(row=1, column=0, sticky="nsew")
-        self.vector_table = ttk.Frame(self.vector_rows_scroll.inner)
-        self.vector_table.grid(row=0, column=0, sticky="ew")
-
-        row_buttons = ttk.Frame(settings)
-        row_buttons.grid(row=2, column=0, sticky="ew", pady=(0, 6))
-        ttk.Button(row_buttons, text="+ Farbe", command=self.add_empty_vector_row).pack(side="left", padx=(0, 4))
-        ttk.Label(row_buttons, text="Profil:").pack(side="left", padx=(12, 4))
-        ttk.Combobox(row_buttons, textvariable=self.profile_var, values=list(vector.PROFILE_ROWS.keys()), state="readonly", width=18).pack(side="left")
-        ttk.Button(row_buttons, text="Anwenden", command=lambda: self.load_vector_profile(self.profile_var.get())).pack(side="left", padx=(4, 0))
+        colors_bar = ttk.LabelFrame(settings, text="Farben / Layer", padding=(8, 6, 8, 6))
+        colors_bar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        colors_bar.columnconfigure(4, weight=1)
+        ttk.Button(colors_bar, text="Farben / Layer bearbeiten", command=self.open_vector_colors_modal).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(colors_bar, text="Profil:").grid(row=0, column=1, sticky="w", padx=(8, 4))
+        ttk.Combobox(colors_bar, textvariable=self.profile_var, values=list(vector.PROFILE_ROWS.keys()), state="readonly", width=18).grid(row=0, column=2, sticky="w")
+        ttk.Button(colors_bar, text="Anwenden", command=lambda: self.load_vector_profile(self.profile_var.get())).grid(row=0, column=3, sticky="w", padx=(4, 0))
+        self.vector_color_count_var = tk.StringVar(value="")
+        ttk.Label(colors_bar, textvariable=self.vector_color_count_var, foreground="#555").grid(row=0, column=4, sticky="w", padx=(12, 0))
+        self._build_vector_colors_modal()
 
         opts = ttk.LabelFrame(settings, text="Vektor-Optionen", padding=8)
-        opts.grid(row=3, column=0, sticky="ew")
+        opts.grid(row=1, column=0, sticky="nsew")
         opts.columnconfigure(2, weight=1)
         ttk.Label(opts, text="Vektorart").grid(row=0, column=0, sticky="w")
         self.vector_mode_box = ttk.Combobox(opts, textvariable=self.vector_mode_display_var, values=[self._mode_label(key) for key in VECTOR_MODE_KEYS], state="readonly", width=20)
@@ -949,30 +984,63 @@ class WorkflowApp(tk.Tk):
         ttk.Entry(opts, textvariable=self.centerline_merge_px_var, width=8).grid(row=0, column=3, sticky="w", padx=(4, 0))
         ttk.Checkbutton(opts, text="Nur geschlossene Pfade", variable=self.closed_paths_only_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Checkbutton(opts, text="SVG-Flächen füllen (Export)", variable=self.fill_closed_shapes_var).grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        ttk.Checkbutton(opts, text="Zusammenhängende Pfade gruppieren (SVG)", variable=self.group_connected_paths_var).grid(row=1, column=2, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(opts, text="Export-Layer pro Farbe", variable=self.force_color_layers_var).grid(row=2, column=2, columnspan=3, sticky="w", pady=(2, 0))
+        ttk.Checkbutton(opts, text="Objekte in Layer erstellen (DXF)", variable=self.object_layers_dxf_var).grid(row=3, column=2, columnspan=3, sticky="w", pady=(2, 0))
         ttk.Checkbutton(opts, text="Bezier für SVG", variable=self.use_bezier_var).grid(row=3, column=0, columnspan=2, sticky="w", pady=(2, 0))
         ttk.Checkbutton(
             opts,
             text="Doppelte Linien entfernen (CAD)",
             variable=self.unique_cad_lines_var,
             command=self.render_vector_preview
-        ).grid(row=3, column=2, columnspan=2, sticky="w", pady=(2, 0))
-        ttk.Label(opts, text="Doppellinien-Toleranz px").grid(row=6, column=2, sticky="w", pady=(8, 0))
-        ttk.Entry(opts, textvariable=self.duplicate_line_tolerance_var, width=8).grid(row=6, column=3, sticky="w", padx=(4, 0), pady=(8, 0))
-        ttk.Label(opts, text="Vorschau-Modus").grid(row=6, column=0, sticky="w", pady=(8, 0))
+        ).grid(row=4, column=2, columnspan=2, sticky="w", pady=(2, 0))
+        ttk.Label(opts, text="Punktreduktion / Epsilon px").grid(row=4, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(opts, from_=0.0, to=5.0, variable=self.global_epsilon_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.global_epsilon_var, value, 3)).grid(row=4, column=1, sticky="ew", padx=(4, 4), pady=(8, 0))
+        ttk.Spinbox(opts, from_=0.0, to=5.0, increment=0.001, textvariable=self.global_epsilon_var, width=8, format="%.3f").grid(row=4, column=2, sticky="w", pady=(8, 0))
+        ttk.Button(opts, text="Auf alle Farben anwenden", command=self.apply_global_epsilon_to_rows).grid(row=4, column=3, sticky="w", padx=(4, 0), pady=(8, 0))
+        ttk.Label(opts, text="Doppellinien-Toleranz px").grid(row=14, column=2, sticky="w", pady=(8, 0))
+        ttk.Entry(opts, textvariable=self.duplicate_line_tolerance_var, width=8).grid(row=14, column=3, sticky="w", padx=(4, 0), pady=(8, 0))
+        ttk.Label(opts, text="Vorschau-Modus").grid(row=14, column=0, sticky="w", pady=(8, 0))
         self.preview_mode_box = ttk.Combobox(opts, textvariable=self.preview_mode_display_var, values=[self._preview_label(key) for key in PREVIEW_MODE_KEYS], state="readonly", width=18)
-        self.preview_mode_box.grid(row=6, column=1, sticky="w", padx=(4, 12), pady=(8, 0))
+        self.preview_mode_box.grid(row=14, column=1, sticky="w", padx=(4, 12), pady=(8, 0))
         self.preview_mode_box.bind("<<ComboboxSelected>>", lambda _event: self.on_preview_mode_display_changed())
-        ttk.Checkbutton(opts, text="Lose Ankerpunkte entfernen", variable=self.remove_loose_points_var).grid(row=1, column=2, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(opts, text="Lose Ankerpunkte entfernen", variable=self.remove_loose_points_var).grid(row=2, column=2, columnspan=2, sticky="w", pady=(2, 0))
         ttk.Checkbutton(opts, text="Rundungen glätten", variable=self.smooth_contours_var).grid(row=2, column=2, sticky="w", pady=(2, 0))
-        ttk.Entry(opts, textvariable=self.smooth_strength_var, width=8).grid(row=2, column=3, sticky="w", padx=(4, 0), pady=(2, 0))
-        ttk.Label(opts, text="Kleine Objekte löschen").grid(row=4, column=0, sticky="w", pady=(8, 0))
+        ttk.Scale(opts, from_=0, to=5, variable=self.smooth_strength_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.smooth_strength_var, value, 3)).grid(row=2, column=3, sticky="ew", padx=(4, 4), pady=(2, 0))
+        ttk.Spinbox(opts, from_=0, to=5, increment=0.001, textvariable=self.smooth_strength_var, width=8, format="%.3f").grid(row=2, column=4, sticky="w", padx=(4, 0), pady=(2, 0))
+        ttk.Checkbutton(opts, text="Vorverarbeitung aktiv", variable=self.preprocess_vector_var).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(opts, text="Weichzeichnen / Blur").grid(row=6, column=0, sticky="w", pady=(2, 0))
+        ttk.Scale(opts, from_=0.0, to=3.0, variable=self.preprocess_blur_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.preprocess_blur_var, value, 3)).grid(row=6, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
+        ttk.Spinbox(opts, from_=0.0, to=3.0, increment=0.001, textvariable=self.preprocess_blur_var, width=8, format="%.3f").grid(row=6, column=2, sticky="w", pady=(2, 0))
+        ttk.Label(opts, text="Kanten beruhigen").grid(row=7, column=0, sticky="w", pady=(2, 0))
+        ttk.Scale(opts, from_=0, to=5, variable=self.preprocess_edge_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.preprocess_edge_var, value, 3)).grid(row=7, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
+        ttk.Spinbox(opts, from_=0, to=5, increment=0.001, textvariable=self.preprocess_edge_var, width=8, format="%.3f").grid(row=7, column=2, sticky="w", pady=(2, 0))
+        ttk.Label(opts, text="Mindeststörung px").grid(row=8, column=0, sticky="w", pady=(2, 0))
+        ttk.Scale(opts, from_=0, to=50, variable=self.preprocess_noise_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.preprocess_noise_var, value, 3)).grid(row=8, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
+        ttk.Spinbox(opts, from_=0, to=50, increment=0.001, textvariable=self.preprocess_noise_var, width=8, format="%.3f").grid(row=8, column=2, sticky="w", pady=(2, 0))
+        ttk.Label(opts, text="Interne Skalierung").grid(row=9, column=0, sticky="w", pady=(2, 0))
+        self.internal_scale_box = ttk.Combobox(opts, textvariable=self.internal_scale_display_var, values=[self._internal_scale_label(key) for key in INTERNAL_SCALE_KEYS], state="readonly", width=10)
+        self.internal_scale_box.grid(row=9, column=1, sticky="w", padx=(4, 12), pady=(2, 0))
+        self.internal_scale_box.bind("<<ComboboxSelected>>", lambda _event: self.on_internal_scale_display_changed())
+        ttk.Button(opts, text="Vorschau aktualisieren", command=self.detect_and_preview_vector).grid(row=9, column=2, sticky="w", pady=(2, 0))
+        ttk.Checkbutton(opts, text="Smart CAD Smoothing", variable=self.smart_smoothing_var).grid(row=10, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(opts, text="Ecken schützen °").grid(row=11, column=0, sticky="w", pady=(2, 0))
+        ttk.Scale(opts, from_=10, to=120, variable=self.smart_corner_angle_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.smart_corner_angle_var, value, 3)).grid(row=11, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
+        ttk.Spinbox(opts, from_=10, to=120, increment=0.001, textvariable=self.smart_corner_angle_var, width=8, format="%.3f").grid(row=11, column=2, sticky="w", pady=(2, 0))
+        ttk.Label(opts, text="Gerade Linien Toleranz px").grid(row=12, column=0, sticky="w", pady=(2, 0))
+        ttk.Scale(opts, from_=0.2, to=5.0, variable=self.smart_line_tolerance_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.smart_line_tolerance_var, value, 3)).grid(row=12, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
+        ttk.Spinbox(opts, from_=0.2, to=5.0, increment=0.001, textvariable=self.smart_line_tolerance_var, width=8, format="%.3f").grid(row=12, column=2, sticky="w", pady=(2, 0))
+        ttk.Label(opts, text="Kurven-Glättung").grid(row=13, column=0, sticky="w", pady=(2, 0))
+        ttk.Scale(opts, from_=0, to=5, variable=self.smart_curve_strength_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.smart_curve_strength_var, value, 3)).grid(row=13, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
+        ttk.Spinbox(opts, from_=0, to=5, increment=0.001, textvariable=self.smart_curve_strength_var, width=8, format="%.3f").grid(row=13, column=2, sticky="w", pady=(2, 0))
+        ttk.Label(opts, text="Kleine Objekte löschen").grid(row=15, column=0, sticky="w", pady=(8, 0))
         self.cleanup_mode_box = ttk.Combobox(opts, textvariable=self.cleanup_mode_display_var, values=[self._cleanup_label(key) for key in CLEANUP_MODE_KEYS], state="readonly", width=12)
-        self.cleanup_mode_box.grid(row=4, column=1, sticky="w", padx=(4, 12), pady=(8, 0))
+        self.cleanup_mode_box.grid(row=15, column=1, sticky="w", padx=(4, 12), pady=(8, 0))
         self.cleanup_mode_box.bind("<<ComboboxSelected>>", lambda _event: self.on_cleanup_mode_display_changed())
-        ttk.Label(opts, text="mm²").grid(row=4, column=2, sticky="w", pady=(8, 0))
-        ttk.Entry(opts, textvariable=self.min_object_area_mm2_var, width=8).grid(row=4, column=3, sticky="w", padx=(4, 0), pady=(8, 0))
-        ttk.Label(opts, text="% Bildfläche").grid(row=5, column=2, sticky="w", pady=(2, 0))
-        ttk.Entry(opts, textvariable=self.min_object_percent_var, width=8).grid(row=5, column=3, sticky="w", padx=(4, 0), pady=(2, 0))
+        ttk.Label(opts, text="mm²").grid(row=15, column=2, sticky="w", pady=(8, 0))
+        ttk.Entry(opts, textvariable=self.min_object_area_mm2_var, width=8).grid(row=15, column=3, sticky="w", padx=(4, 0), pady=(8, 0))
+        ttk.Label(opts, text="% Bildfläche").grid(row=16, column=2, sticky="w", pady=(2, 0))
+        ttk.Entry(opts, textvariable=self.min_object_percent_var, width=8).grid(row=16, column=3, sticky="w", padx=(4, 0), pady=(2, 0))
 
         preview = ttk.Frame(panes)
         preview.columnconfigure(0, weight=1)
@@ -1015,6 +1083,59 @@ class WorkflowApp(tk.Tk):
 
         panes.add(settings, weight=2)
         panes.add(preview, weight=3)
+
+    def _build_vector_colors_modal(self) -> None:
+        self.vector_colors_window = tk.Toplevel(self)
+        self.vector_colors_window.title(tr("step2.edit_colors"))
+        self.vector_colors_window.geometry("980x520")
+        self.vector_colors_window.minsize(760, 360)
+        self.vector_colors_window.withdraw()
+        self.vector_colors_window.protocol("WM_DELETE_WINDOW", self.close_vector_colors_modal)
+        self.vector_colors_window.columnconfigure(0, weight=1)
+        self.vector_colors_window.rowconfigure(1, weight=1)
+
+        controls = ttk.Frame(self.vector_colors_window, padding=(8, 8, 8, 4))
+        controls.grid(row=0, column=0, sticky="ew")
+        controls.columnconfigure(5, weight=1)
+        add_button = ttk.Button(controls, text="+ Farbe", command=self.add_empty_vector_row)
+        add_button.grid(row=0, column=0, sticky="w", padx=(0, 4))
+        self._register_i18n(add_button, "text", "step2.add_color")
+        profile_label = ttk.Label(controls, text="Profil:")
+        profile_label.grid(row=0, column=1, sticky="w", padx=(12, 4))
+        self._register_i18n(profile_label, "text", "step2.profile")
+        ttk.Combobox(controls, textvariable=self.profile_var, values=list(vector.PROFILE_ROWS.keys()), state="readonly", width=18).grid(row=0, column=2, sticky="w")
+        apply_button = ttk.Button(controls, text="Anwenden", command=lambda: self.load_vector_profile(self.profile_var.get()))
+        apply_button.grid(row=0, column=3, sticky="w", padx=(4, 0))
+        self._register_i18n(apply_button, "text", "step2.apply")
+        detect_button = ttk.Button(controls, text="Farben aus Bild erkennen", command=self.autofill_vector_rows_from_image)
+        detect_button.grid(row=0, column=4, sticky="w", padx=(12, 0))
+        self._register_i18n(detect_button, "text", "step2.detect_colors_from_image")
+        close_button = ttk.Button(controls, text=tr("button.close"), command=self.close_vector_colors_modal)
+        close_button.grid(row=0, column=6, sticky="e")
+        self._register_i18n(close_button, "text", "button.close")
+
+        table_box = ttk.LabelFrame(self.vector_colors_window, text="Dynamische Farbtabelle", padding=4)
+        table_box.grid(row=1, column=0, sticky="nsew", padx=8, pady=(4, 8))
+        self._register_i18n(table_box, "text", "step2.dynamic_table")
+        table_box.columnconfigure(0, weight=1)
+        table_box.rowconfigure(1, weight=1)
+        header = ttk.Frame(table_box)
+        header.grid(row=0, column=0, sticky="ew")
+        for col, text in enumerate(["Name", "RGB", "Tol.", "Layer", "Export", "Min.", "Epsilon", ""]):
+            ttk.Label(header, text=text, width=[14, 13, 7, 14, 7, 7, 7, 3][col]).grid(row=0, column=col, padx=2, sticky="w")
+        self.vector_rows_scroll = recolor.ScrollableFrame(table_box, height=360)
+        self.vector_rows_scroll.grid(row=1, column=0, sticky="nsew")
+        self.vector_table = ttk.Frame(self.vector_rows_scroll.inner)
+        self.vector_table.grid(row=0, column=0, sticky="ew")
+
+    def open_vector_colors_modal(self) -> None:
+        self.update_vector_color_count()
+        self.vector_colors_window.deiconify()
+        self.vector_colors_window.lift()
+        self.vector_colors_window.focus_set()
+
+    def close_vector_colors_modal(self) -> None:
+        self.vector_colors_window.withdraw()
 
     # ------------------------------------------------------------------ Navigation
     def show_step(self, index: int) -> None:
@@ -1119,6 +1240,30 @@ class WorkflowApp(tk.Tk):
                 self.cleanup_mode_var.set(key)
                 break
 
+    def on_internal_scale_display_changed(self) -> None:
+        selected = self.internal_scale_display_var.get()
+        for key in INTERNAL_SCALE_KEYS:
+            if selected == self._internal_scale_label(key):
+                self.internal_scale_var.set(key)
+                break
+
+    def apply_global_epsilon_to_rows(self) -> None:
+        value = str(self.global_epsilon_var.get()).replace(",", ".")
+        for row in self.vector_rows:
+            row.epsilon_var.set(value)
+        self.status_var.set(f"Epsilon auf alle Farben angewendet: {value}")
+
+    def _set_numeric_var(self, variable: tk.Variable, value: str, decimals: int = 3) -> None:
+        try:
+            number = float(str(value).replace(",", "."))
+        except Exception:
+            return
+        if decimals <= 0:
+            text = str(int(round(number)))
+        else:
+            text = f"{number:.{decimals}f}".rstrip("0").rstrip(".")
+        variable.set(text)
+
     def set_progress(self, value: float, status: Optional[str] = None) -> None:
         self.progress_var.set(max(0.0, min(100.0, value)))
         if status is not None:
@@ -1193,7 +1338,15 @@ class WorkflowApp(tk.Tk):
         self.preview_after_id = self.after(180, self.update_step1_preview)
 
     def on_step1_mode_changed(self) -> None:
+        self.update_step1_picker_cursor()
         self.update_step1_preview()
+
+    def update_step1_picker_cursor(self) -> None:
+        try:
+            cursor = "crosshair" if self.step1_notebook.index(self.step1_notebook.select()) == 1 else ""
+            self.step1_original_canvas.canvas.configure(cursor=cursor)
+        except Exception:
+            pass
 
     def clear_basic_rows(self) -> None:
         for row in self.basic_rows:
@@ -1393,12 +1546,17 @@ class WorkflowApp(tk.Tk):
     def clear_vector_rows(self) -> None:
         for row in self.vector_rows:
             row.destroy()
+        if hasattr(self, "vector_table"):
+            for child in self.vector_table.winfo_children():
+                child.destroy()
         self.vector_rows.clear()
+        self.update_vector_color_count()
 
     def add_vector_row(self, name: str, rgb: str, tolerance: str, layer: str, export: bool, min_area: str, epsilon: str) -> None:
         row_index = len(self.vector_rows) + 1
         row = vector.ColorRow(self.vector_table, row_index, name, rgb, tolerance, layer, export, min_area, epsilon, remove_callback=self.remove_vector_row)
         self.vector_rows.append(row)
+        self.update_vector_color_count()
 
     def add_empty_vector_row(self) -> None:
         self.add_vector_row("Neue Farbe", "255,0,0", "10", "CUT_LAYER", True, "20", "1.5")
@@ -1408,6 +1566,12 @@ class WorkflowApp(tk.Tk):
         if row in self.vector_rows:
             self.vector_rows.remove(row)
         self.redraw_vector_rows()
+        self.update_vector_color_count()
+
+    def update_vector_color_count(self) -> None:
+        if hasattr(self, "vector_color_count_var"):
+            export_count = sum(1 for row in self.vector_rows if row.export_var.get())
+            self.vector_color_count_var.set(f"{len(self.vector_rows)} Farben | Export aktiv: {export_count}")
 
     def redraw_vector_rows(self) -> None:
         saved = [(r.name_var.get(), r.rgb_var.get(), r.tolerance_var.get(), r.layer_var.get(), r.export_var.get(), r.min_area_var.get(), r.epsilon_var.get()) for r in self.vector_rows]
@@ -1440,7 +1604,8 @@ class WorkflowApp(tk.Tk):
             is_near_white = all(v >= 245 for v in rgb)
             export = not (is_white or is_near_white)
             safe = name.upper().replace("WEISS", "WHITE").replace("Ä", "AE").replace("Ö", "OE").replace("Ü", "UE").replace(" ", "_")
-            layer = f"CUT_{safe}" if export else f"IGNORE_{safe}"
+            rgb_suffix = f"RGB_{rgb[0]:03d}_{rgb[1]:03d}_{rgb[2]:03d}"
+            layer = f"CUT_{safe}_{rgb_suffix}" if export else f"IGNORE_{safe}_{rgb_suffix}"
             tol = "8" if export else "5"
             min_area = "50" if export else "50"
             eps = "1.5" if export else "1.5"
@@ -1493,6 +1658,51 @@ class WorkflowApp(tk.Tk):
         text = self.smooth_strength_var.get().strip()
         return min(5, max(0, int(float(text.replace(",", "."))))) if text else 0
 
+    def apply_manual_smoothing_if_enabled(self, contours: List[Any], iterations: Optional[int] = None) -> List[Any]:
+        smooth_iterations = self.get_smooth_iterations() if iterations is None else max(0, min(5, int(iterations)))
+        if smooth_iterations <= 0:
+            return contours
+        return vector.smooth_contours(contours, smooth_iterations)
+
+    def get_preprocess_blur(self) -> float:
+        return min(3.0, max(0.0, float(str(self.preprocess_blur_var.get()).replace(",", "."))))
+
+    def get_preprocess_edge_smoothing(self) -> int:
+        return min(5, max(0, int(float(str(self.preprocess_edge_var.get()).replace(",", ".")))))
+
+    def get_preprocess_noise_area(self) -> int:
+        return min(50, max(0, int(float(str(self.preprocess_noise_var.get()).replace(",", ".")))))
+
+    def get_internal_scale(self) -> int:
+        if not self.preprocess_vector_var.get():
+            return 1
+        try:
+            return max(1, min(3, int(self.internal_scale_var.get())))
+        except Exception:
+            return 1
+
+    def get_smart_corner_angle(self) -> float:
+        text = self.smart_corner_angle_var.get().strip()
+        return min(120.0, max(10.0, float(text.replace(",", ".")))) if text else 45.0
+
+    def get_smart_line_tolerance_px(self) -> float:
+        text = self.smart_line_tolerance_var.get().strip()
+        return min(5.0, max(0.2, float(text.replace(",", ".")))) if text else 1.0
+
+    def get_smart_curve_strength(self) -> int:
+        text = self.smart_curve_strength_var.get().strip()
+        return min(5, max(0, int(float(text.replace(",", "."))))) if text else 2
+
+    def apply_smart_smoothing_if_enabled(self, contours: List[Any]) -> List[Any]:
+        if not self.smart_smoothing_var.get():
+            return contours
+        return vector.smart_smooth_contours(
+            contours,
+            corner_angle_deg=self.get_smart_corner_angle(),
+            line_tolerance_px=self.get_smart_line_tolerance_px(),
+            curve_smoothing_strength=self.get_smart_curve_strength(),
+        )
+
     def get_centerline_merge_px(self) -> float:
         text = self.centerline_merge_px_var.get().strip()
         return max(0.0, float(text.replace(",", "."))) if text else 0.0
@@ -1522,9 +1732,14 @@ class WorkflowApp(tk.Tk):
                 rules,
                 closed_paths_only=self.closed_paths_only_var.get() and not centerline_mode,
                 remove_loose_points=self.remove_loose_points_var.get(),
-                smooth_iterations=self.get_smooth_iterations(),
+                smooth_iterations=0,
                 centerline_mode=centerline_mode,
                 centerline_merge_px=self.get_centerline_merge_px(),
+                preprocess_enabled=self.preprocess_vector_var.get(),
+                preprocess_blur=self.get_preprocess_blur(),
+                preprocess_edge_smoothing=self.get_preprocess_edge_smoothing(),
+                preprocess_noise_area=self.get_preprocess_noise_area(),
+                internal_scale=self.get_internal_scale(),
                 progress_callback=lambda fraction: self.set_progress(10 + fraction * 65, "Konturen werden erkannt...")
             )
             before = len(contours)
@@ -1538,6 +1753,8 @@ class WorkflowApp(tk.Tk):
                 (w, h),
                 pixel_to_mm,
             )
+            self.detected_contours = self.apply_manual_smoothing_if_enabled(self.detected_contours)
+            self.detected_contours = self.apply_smart_smoothing_if_enabled(self.detected_contours)
             self.render_vector_preview()
             exported = sum(1 for c in self.detected_contours if c.rule.export)
             points = sum(len(c.points) for c in self.detected_contours if c.rule.export)
@@ -2047,11 +2264,18 @@ class WorkflowApp(tk.Tk):
                     rules,
                     closed_paths_only=self.closed_paths_only_var.get() and not centerline_mode,
                     remove_loose_points=self.remove_loose_points_var.get(),
-                    smooth_iterations=int(cand["smooth"]),
+                    smooth_iterations=0,
                     centerline_mode=centerline_mode,
                     centerline_merge_px=float(cand["merge"]),
+                    preprocess_enabled=self.preprocess_vector_var.get(),
+                    preprocess_blur=self.get_preprocess_blur(),
+                    preprocess_edge_smoothing=self.get_preprocess_edge_smoothing(),
+                    preprocess_noise_area=self.get_preprocess_noise_area(),
+                    internal_scale=self.get_internal_scale(),
                 )
                 contours = vector.filter_small_contours(contours, self.cleanup_mode_var.get(), self.get_min_object_area_mm2(), self.get_min_object_percent(), (w, h), pixel_to_mm)
+                contours = self.apply_manual_smoothing_if_enabled(contours, iterations=int(cand["smooth"]))
+                contours = self.apply_smart_smoothing_if_enabled(contours)
                 score = vector.score_vector_result(self.vector_image_rgb, rules, contours, centerline_mode)
                 if score > best_score:
                     best_score = score
@@ -2093,7 +2317,16 @@ class WorkflowApp(tk.Tk):
             h, w = self.vector_image_rgb.shape[:2]
             self.set_progress(60, "Datei wird geschrieben...")
             if suffix == ".svg":
-                vector.export_svg(out, (w, h), self.detected_contours, pixel_to_mm, fill_closed_shapes=self.fill_closed_shapes_var.get(), use_bezier=self.use_bezier_var.get())
+                vector.export_svg(
+                    out,
+                    (w, h),
+                    self.detected_contours,
+                    pixel_to_mm,
+                    fill_closed_shapes=self.fill_closed_shapes_var.get(),
+                    use_bezier=self.use_bezier_var.get(),
+                    group_connected_paths=self.group_connected_paths_var.get(),
+                    force_color_layers=self.force_color_layers_var.get(),
+                )
             elif suffix == ".dxf":
                 vector.export_dxf(
                     out,
@@ -2104,6 +2337,8 @@ class WorkflowApp(tk.Tk):
                     dxf_version=self.get_selected_dxf_version(),
                     dedupe_segments=self.unique_cad_lines_var.get(),
                     dedupe_tolerance_px=self.get_duplicate_line_tolerance_px(),
+                    force_color_layers=self.force_color_layers_var.get(),
+                    object_layers=self.object_layers_dxf_var.get(),
                 )
             else:
                 raise ValueError("Output muss .dxf oder .svg sein.")
