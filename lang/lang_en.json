@@ -15,6 +15,7 @@
   "status.auto_from_image_done": "Auto settings based on image applied.",
   "status.auto_from_image_textlogo": "Auto settings: text/logo mode (fine details prioritized).",
   "status.auto_expert_done": "Expert values automatically set from image.",
+  "status.high_detail_applied": "High detail fidelity enabled.",
   "language.incomplete": "Language file incomplete, fallback used for missing texts.",
   "language.fallback_name": "German (Fallback)",
   "step1.input_image": "Input image:",
@@ -107,6 +108,7 @@
   "step2.smart_corner_angle": "Protect corners deg",
   "step2.smart_line_tolerance": "Straight line tolerance px",
   "step2.smart_curve_strength": "Curve smoothing",
+  "step2.high_detail": "High Detail Fidelity",
   "step2.quick_preview": "Preview",
   "step2.quick_export": "Export",
   "step2.quick_colors": "Colors...",
@@ -160,5 +162,11 @@
   "msg.accepted": "The edited image was imported for step 2.",
   "msg.auto_expert_prompt_title": "Prepare step 2",
   "msg.auto_expert_prompt": "Should Vektorrazor suggest suitable expert values for this image and apply them now?\n\nYes: values are set automatically and the preview is recalculated.\nNo: current values stay unchanged.",
-  "msg.export_done_title": "Export complete"
+  "msg.export_done_title": "Export complete",
+   "msg.auto_values_error_title": "Auto Values Error",
+  "msg.no_intermediate_load_first": "Please load or edit an image first.",
+  "msg.profile_title": "Profile",
+  "msg.profile_unknown": "Unknown profile: {profile}",
+  "msg.recognize_error_title": "Detection Error",
+  "step2.hole_scale": "Hole size / inner holes"
 }

@@ -37,6 +37,8 @@ FALLBACK_DE: dict[str, str] = {
     "status.auto_from_image_done": "Auto-Einstellungen aus Bild gesetzt.",
     "status.auto_from_image_textlogo": "Auto-Einstellungen: Text/Logo-Modus (Feindetails priorisiert).",
     "status.auto_expert_done": "Expertenwerte automatisch aus Bild gesetzt.",
+    "status.high_detail_applied": "Hohe Detailtreue aktiviert.",
+    "status.lineart_preset_applied": "Schwarzweiß-Lineart-Vorschlag angewendet.",
     "step1.input_image": "Input-Bild:",
     "step1.load_image": "Bild laden",
     "step1.save_png": "PNG speichern",
@@ -127,6 +129,7 @@ FALLBACK_DE: dict[str, str] = {
     "step2.smart_line_tolerance": "Gerade Linien Toleranz px",
     "step2.smart_curve_strength": "Kurven-Glaettung",
     "step2.hole_scale": "Lochgröße / Innenlöcher",
+    "step2.high_detail": "Hohe Detailtreue",
     "step2.quick_preview": "Vorschau",
     "step2.manual_refresh": "Vorschau manuell aktualisieren",
     "step2.quick_export": "Export",
@@ -144,6 +147,8 @@ FALLBACK_DE: dict[str, str] = {
     "canvas.vector_preview": "Vektor-Vorschau",
     "button.choose": "waehlen",
     "button.close": "Schliessen",
+    "button.apply": "Anwenden",
+    "button.cancel": "Abbrechen",
     "label.tolerance_short": "Tol.",
     "vector_mode.area": "Flaechenkontur",
     "vector_mode.centerline": "Mittellinie / Gravur",
@@ -186,12 +191,27 @@ FALLBACK_DE: dict[str, str] = {
     "msg.auto_values_error_title": "Fehler bei Auto-Werten",
     "msg.auto_expert_prompt_title": "Schritt 2 vorbereiten",
     "msg.auto_expert_prompt": "Möchten Sie passende Expertenwerte für dieses Bild automatisch vorschlagen lassen?\n\nJa: Werte werden gesetzt und die Vorschau neu berechnet.\nNein: Aktuelle Werte bleiben unverändert.",
+    "msg.lineart_recommend_title": "Schwarzweiß-Lineart erkannt",
+    "msg.lineart_recommend_intro": "Dieses Zwischenbild wirkt wie Schwarzweiß-Lineart. Empfohlen werden detailfreundliche Werte: keine automatische Weichzeichnung, keine kleinen Objektlöschungen und Schwarz/Weiß-Regeln aus dem Zwischen-PNG.\n\nWähle, welche Vorschau direkt geöffnet werden soll:",
+    "msg.lineart_choice_contour": "zeigt die echten Vektorpfade und ist für CAD-Kontrolle meist besser",
+    "msg.lineart_choice_mask": "zeigt die reine Raster-Farberkennung vor der Konturfindung",
+    "msg.lineart_expert_hint": "Du kannst diese Ansicht später im Expertenmodus jederzeit unter 'Vorschau-Modus' wechseln.",
     "msg.export_done_title": "Export fertig",
 }
 
 FALLBACK_EN_PATCH: dict[str, str] = {
     "step2.auto_expert_from_image": "Suggest Auto Values (Optional)",
     "step2.hole_scale": "Hole size / inner holes",
+    "step2.high_detail": "High Detail Fidelity",
+    "status.high_detail_applied": "High detail fidelity enabled.",
+    "status.lineart_preset_applied": "Black/white line-art preset applied.",
+    "button.apply": "Apply",
+    "button.cancel": "Cancel",
+    "msg.lineart_recommend_title": "Black/White Line Art Detected",
+    "msg.lineart_recommend_intro": "This intermediate image looks like black/white line art. Detail-friendly values are recommended: no automatic blur, no small-object deletion, and black/white rules from the intermediate PNG.\n\nChoose which preview should open now:",
+    "msg.lineart_choice_contour": "shows the actual vector paths and is usually best for CAD checking",
+    "msg.lineart_choice_mask": "shows raw raster color detection before contour finding",
+    "msg.lineart_expert_hint": "You can change this later in Expert mode under 'Preview mode'.",
     "msg.auto_expert_prompt_title": "Prepare Step 2",
     "msg.auto_expert_prompt": "Do you want Vektorrazor to suggest suitable expert values for this image?\n\nYes: values are applied and preview is recalculated.\nNo: current values stay unchanged.",
     "msg.no_intermediate_load_first": "Please load or edit an image first.",
@@ -201,6 +221,13 @@ FALLBACK_EN_PATCH: dict[str, str] = {
     "msg.auto_values_error_title": "Auto Values Error",
 }
 
+
+
+def fallback_for_language(code: str) -> dict[str, str]:
+    fallback = dict(FALLBACK_DE)
+    if code == "en":
+        fallback.update(FALLBACK_EN_PATCH)
+    return fallback
 
 def _source_dir() -> Path:
     return Path(__file__).resolve().parent
@@ -225,11 +252,16 @@ def validate_language_file(language_dict: dict[str, Any], fallback_dict: dict[st
 def _normalize_german_texts(language_dict: dict[str, str]) -> None:
     """Gezielte Korrekturen für ältere DE-Dateien ohne Umlaute."""
     replacements = {
-        "step2.live_preview": FALLBACK_DE.get("step2.live_preview", ""),
-        "step2.auto_expert_from_image": FALLBACK_DE.get("step2.auto_expert_from_image", ""),
-        "step2.hole_scale": FALLBACK_DE.get("step2.hole_scale", ""),
-        "msg.auto_expert_prompt_title": FALLBACK_DE.get("msg.auto_expert_prompt_title", ""),
-        "msg.auto_expert_prompt": FALLBACK_DE.get("msg.auto_expert_prompt", ""),
+        "step2.live_preview": "Änderungen LIVE anzeigen",
+        "step2.auto_expert_from_image": "Auto-Werte vorschlagen (optional)",
+        "step2.hole_scale": "Lochgröße / Innenlöcher",
+        "step2.high_detail": "Hohe Detailtreue",
+        "step2.smart_corner_angle": "Ecken schützen Grad",
+        "step2.smart_curve_strength": "Kurven-Glättung",
+        "step2.group_connected_paths": "Zusammenhängende Pfade gruppieren (SVG)",
+        "step2.percent_area": "% Bildfläche",
+        "msg.auto_expert_prompt_title": "Schritt 2 vorbereiten",
+        "msg.auto_expert_prompt": "Möchten Sie passende Expertenwerte für dieses Bild automatisch vorschlagen lassen?\n\nJa: Werte werden gesetzt und die Vorschau neu berechnet.\nNein: Aktuelle Werte bleiben unverändert.",
     }
     for key, value in replacements.items():
         if value:
@@ -262,7 +294,7 @@ def load_languages() -> None:
                     raw = json.load(handle)
                 if not isinstance(raw, dict):
                     raise ValueError("language root must be an object")
-                merged, missing = validate_language_file(raw, FALLBACK_DE)
+                merged, missing = validate_language_file(raw, fallback_for_language(code))
                 if code == "de":
                     _normalize_german_texts(merged)
                 elif code == "en":

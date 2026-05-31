@@ -66,33 +66,33 @@ class DetectedContour:
 
 PROFILE_ROWS: Dict[str, List[Tuple[str, str, str, str, bool, str, str]]] = {
     "Standard": [
-        ("Schwarz", "0,0,0", "8", "CUT_BLACK", True, "50", "1.5"),
-        ("Blau", "0,0,255", "10", "CUT_BLUE", True, "30", "1.2"),
+        ("Schwarz", "0,0,0", "12", "CUT_BLACK", True, "2", "0.350"),
+        ("Blau", "0,0,255", "12", "CUT_BLUE", True, "2", "0.350"),
         ("Grün", "0,255,0", "10", "IGNORE", False, "20", "1.2"),
     ],
     "Schwarz/Weiß": [
-        ("Schwarz", "0,0,0", "8", "CUT_BLACK", True, "50", "1.5"),
+        ("Schwarz", "0,0,0", "12", "CUT_BLACK", True, "2", "0.350"),
         ("Weiß", "255,255,255", "8", "IGNORE_WHITE", False, "50", "1.5"),
     ],
     "Schwarze Linien": [
-        ("Schwarz", "0,0,0", "12", "CUT_BLACK", True, "30", "1.2"),
+        ("Schwarz", "0,0,0", "14", "CUT_BLACK", True, "2", "0.300"),
     ],
     "Primärfarben": [
-        ("Rot", "255,0,0", "10", "CUT_RED", True, "30", "1.2"),
+        ("Rot", "255,0,0", "12", "CUT_RED", True, "2", "0.350"),
         ("Grün", "0,255,0", "10", "CUT_GREEN", True, "30", "1.2"),
-        ("Blau", "0,0,255", "10", "CUT_BLUE", True, "30", "1.2"),
+        ("Blau", "0,0,255", "12", "CUT_BLUE", True, "2", "0.350"),
     ],
     "CMYK": [
-        ("Cyan", "0,255,255", "10", "CUT_CYAN", True, "30", "1.2"),
-        ("Magenta", "255,0,255", "10", "CUT_MAGENTA", True, "30", "1.2"),
-        ("Gelb", "255,255,0", "10", "CUT_YELLOW", True, "30", "1.2"),
-        ("Schwarz", "0,0,0", "8", "CUT_BLACK", True, "50", "1.5"),
+        ("Cyan", "0,255,255", "12", "CUT_CYAN", True, "2", "0.350"),
+        ("Magenta", "255,0,255", "12", "CUT_MAGENTA", True, "2", "0.350"),
+        ("Gelb", "255,255,0", "12", "CUT_YELLOW", True, "2", "0.350"),
+        ("Schwarz", "0,0,0", "12", "CUT_BLACK", True, "2", "0.350"),
     ],
     "RGB + Schwarz": [
-        ("Rot", "255,0,0", "10", "CUT_RED", True, "30", "1.2"),
+        ("Rot", "255,0,0", "12", "CUT_RED", True, "2", "0.350"),
         ("Grün", "0,255,0", "10", "CUT_GREEN", True, "30", "1.2"),
-        ("Blau", "0,0,255", "10", "CUT_BLUE", True, "30", "1.2"),
-        ("Schwarz", "0,0,0", "8", "CUT_BLACK", True, "50", "1.5"),
+        ("Blau", "0,0,255", "12", "CUT_BLUE", True, "2", "0.350"),
+        ("Schwarz", "0,0,0", "12", "CUT_BLACK", True, "2", "0.350"),
     ],
 }
 
@@ -219,9 +219,21 @@ def load_rgb_image(path: str) -> np.ndarray:
 
 def make_color_mask(image_rgb: np.ndarray, rgb: Tuple[int, int, int], tolerance: float) -> np.ndarray:
     target = np.array(rgb, dtype=np.float32)
+    tol = max(0.0, float(tolerance))
+
+    # Für Graustufen-Ziele (insb. Schwarz/Weiß) ist Kanal-euklidische Distanz
+    # oft zu streng für Anti-Aliasing-Pixel. Luma-Distanz liefert stabilere
+    # Ergebnisse bei ähnlich kontrastreichen Linien.
+    if abs(float(rgb[0]) - float(rgb[1])) <= 2.0 and abs(float(rgb[1]) - float(rgb[2])) <= 2.0:
+        gray = image_rgb.astype(np.float32).mean(axis=2)
+        target_gray = float(target.mean())
+        dist = np.abs(gray - target_gray)
+        mask = (dist <= tol).astype(np.uint8) * 255
+        return mask
+
     diff = image_rgb.astype(np.float32) - target
     dist = np.sqrt(np.sum(diff * diff, axis=2))
-    mask = (dist <= float(tolerance)).astype(np.uint8) * 255
+    mask = (dist <= tol).astype(np.uint8) * 255
     return mask
 
 
@@ -229,7 +241,7 @@ def preprocess_vector_image(
     image_rgb: np.ndarray,
     enabled: bool = False,
     blur_radius: float = 0.0,
-    edge_smoothing: int = 0,
+    edge_smoothing: float = 0.0,
 ) -> np.ndarray:
     if not enabled:
         return image_rgb
@@ -238,13 +250,12 @@ def preprocess_vector_image(
     blur = max(0.0, float(blur_radius))
     if blur > 0.0:
         sigma = min(3.0, blur)
-        kernel = max(3, int(round(sigma * 4.0)) | 1)
-        result = cv2.GaussianBlur(result, (kernel, kernel), sigmaX=sigma, sigmaY=sigma)
+        result = cv2.GaussianBlur(result, (0, 0), sigmaX=sigma, sigmaY=sigma)
 
-    calm = max(0, min(5, int(edge_smoothing)))
-    if calm > 0:
-        kernel = max(3, calm * 2 + 1)
-        result = cv2.medianBlur(result, kernel)
+    calm = max(0.0, min(5.0, float(edge_smoothing)))
+    if calm > 0.0:
+        sigma_edge = 0.25 + calm * 0.55
+        result = cv2.GaussianBlur(result, (0, 0), sigmaX=sigma_edge, sigmaY=sigma_edge)
 
     return result
 
@@ -274,26 +285,26 @@ def remove_small_components(mask: np.ndarray, min_area: int) -> np.ndarray:
 
 def calm_mask_edges(
     mask: np.ndarray,
-    edge_smoothing: int = 0,
-    min_noise_area: int = 0,
+    edge_smoothing: float = 0.0,
+    min_noise_area: float = 0.0,
 ) -> np.ndarray:
     result = mask
 
-    noise_area = max(0, int(min_noise_area))
+    noise_area = max(0, int(round(float(min_noise_area))))
     if noise_area > 0:
         result = remove_small_components(result, noise_area)
 
-    calm = max(0, min(5, int(edge_smoothing)))
-    if calm <= 0:
+    calm = max(0.0, min(5.0, float(edge_smoothing)))
+    if calm <= 0.0:
         return result
 
-    kernel_size = calm * 2 + 1
+    kernel_size = max(3, int(round(calm * 2.0)) * 2 + 1)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
     result = cv2.morphologyEx(result, cv2.MORPH_CLOSE, kernel)
-    if calm >= 2:
+    if calm >= 2.0:
         result = cv2.morphologyEx(result, cv2.MORPH_OPEN, kernel)
-    result = cv2.GaussianBlur(result, (kernel_size, kernel_size), sigmaX=max(0.5, calm * 0.35))
-    _, result = cv2.threshold(result, 127, 255, cv2.THRESH_BINARY)
+    result = cv2.GaussianBlur(result, (0, 0), sigmaX=max(0.5, calm * 0.35))
+    _, result = cv2.threshold(result, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return result.astype(np.uint8)
 
 
@@ -1184,7 +1195,9 @@ def render_contours_to_mask(
     width, height = image_size
     mask = np.zeros((height, width), dtype=np.uint8)
 
-    # Erst Flaechen aufbauen, danach Loecher wieder ausstanzen.
+    # Konturen in erkannter Reihenfolge rendern.
+    # So bleiben verschachtelte Formen stabil:
+    # Außenform -> Loch -> Inneninsel.
     for contour in contours:
         if not contour.points:
             continue
@@ -1194,31 +1207,13 @@ def render_contours_to_mask(
             dtype=np.int32
         )
 
-        if contour.closed and len(pts) >= 3 and not contour.is_hole:
-            cv2.fillPoly(mask, [pts], 255)
-
-    for contour in contours:
-        if not contour.points or not contour.closed or not contour.is_hole:
-            continue
-        pts = np.array(
-            [[int(round(x)), int(round(y))] for x, y in contour.points],
-            dtype=np.int32
-        )
-        if len(pts) >= 3:
-            cv2.fillPoly(mask, [pts], 0)
-
-    for contour in contours:
-        if not contour.points:
-            continue
-        pts = np.array(
-            [[int(round(x)), int(round(y))] for x, y in contour.points],
-            dtype=np.int32
-        )
-        if not contour.closed and len(pts) >= 2:
+        if contour.closed and len(pts) >= 3:
+            fill_value = 0 if getattr(contour, "is_hole", False) else 255
+            cv2.fillPoly(mask, [pts], int(fill_value))
+        elif len(pts) >= 2:
             cv2.polylines(mask, [pts], isClosed=False, color=255, thickness=max(1, stroke_width))
 
     return mask
-
 
 def score_vector_result(
     image_rgb: np.ndarray,
@@ -1258,8 +1253,8 @@ def find_contours_for_rule(
     closed_paths_only: bool = False,
     remove_loose_points: bool = False,
     smooth_iterations: int = 0,
-    mask_edge_smoothing: int = 0,
-    mask_noise_area: int = 0,
+    mask_edge_smoothing: float = 0.0,
+    mask_noise_area: float = 0.0,
 ) -> List[DetectedContour]:
     mask = make_color_mask(image_rgb, rule.rgb, rule.tolerance)
     mask = remove_small_components(mask, rule.min_area)
@@ -1281,7 +1276,7 @@ def find_contours_for_rule(
         is_hole = parent != -1
         area = abs(cv2.contourArea(contour))
         if is_hole:
-            if area < 2.0:
+            if area < 0.5:
                 continue
         else:
             if area < rule.min_area:
@@ -1317,8 +1312,8 @@ def find_centerlines_for_rule(
     rule: ColorRule,
     remove_loose_points: bool = False,
     merge_distance_px: float = 0.0,
-    mask_edge_smoothing: int = 0,
-    mask_noise_area: int = 0,
+    mask_edge_smoothing: float = 0.0,
+    mask_noise_area: float = 0.0,
 ) -> List[DetectedContour]:
     mask = make_color_mask(image_rgb, rule.rgb, rule.tolerance)
     mask = merge_nearby_mask_lines(mask, merge_distance_px)
@@ -1364,8 +1359,8 @@ def detect_all_contours(
     centerline_merge_px: float = 0.0,
     preprocess_enabled: bool = False,
     preprocess_blur: float = 0.0,
-    preprocess_edge_smoothing: int = 0,
-    preprocess_noise_area: int = 0,
+    preprocess_edge_smoothing: float = 0.0,
+    preprocess_noise_area: float = 0.0,
     internal_scale: int = 1,
     progress_callback=None
 ) -> List[DetectedContour]:
@@ -1386,7 +1381,7 @@ def detect_all_contours(
             tolerance=rule.tolerance,
             layer=rule.layer,
             export=rule.export,
-            min_area=max(1, int(round(rule.min_area * area_scale))),
+            min_area=max(0, int(round(rule.min_area * area_scale))),
             epsilon=max(0.0, float(rule.epsilon) * scale),
         )
         for rule in rules
@@ -1395,8 +1390,8 @@ def detect_all_contours(
         id(scaled_rule): original_rule
         for scaled_rule, original_rule in zip(scaled_rules, rules)
     }
-    mask_noise_area = max(0, int(round(preprocess_noise_area * area_scale))) if preprocess_enabled else 0
-    mask_edge_smoothing = max(0, int(preprocess_edge_smoothing)) if preprocess_enabled else 0
+    mask_noise_area = max(0.0, float(preprocess_noise_area) * area_scale) if preprocess_enabled else 0.0
+    mask_edge_smoothing = max(0.0, min(5.0, float(preprocess_edge_smoothing))) if preprocess_enabled else 0.0
     merge_px = centerline_merge_px * scale
     total_rules = max(1, len(rules))
     for index, rule in enumerate(scaled_rules):
@@ -1718,10 +1713,11 @@ class ColorRow:
         self.epsilon_var = tk.StringVar(value=epsilon)
 
         self.widgets = []
+        self._syncing_tolerance = False
 
         self._add_entry(self.name_var, 14)
         self._add_entry(self.rgb_var, 13)
-        self._add_entry(self.tolerance_var, 8)
+        self._add_tolerance_control()
         self._add_entry(self.layer_var, 14)
 
         check = ttk.Checkbutton(parent, variable=self.export_var)
@@ -1740,6 +1736,64 @@ class ColorRow:
         entry = ttk.Entry(self.frame, textvariable=variable, width=width)
         entry.grid(row=self.row_index, column=col, padx=2, pady=2, sticky="ew")
         self.widgets.append(entry)
+
+    @staticmethod
+    def _clamp_tolerance(value: float) -> float:
+        return max(0.0, min(255.0, float(value)))
+
+    def _on_tolerance_scale_changed(self, value: str) -> None:
+        if self._syncing_tolerance:
+            return
+        try:
+            number = self._clamp_tolerance(float(str(value).replace(",", ".")))
+        except Exception:
+            return
+        self._syncing_tolerance = True
+        try:
+            self.tolerance_var.set(str(int(round(number))))
+        finally:
+            self._syncing_tolerance = False
+
+    def _on_tolerance_text_changed(self, *_args: object) -> None:
+        if self._syncing_tolerance:
+            return
+        try:
+            number = self._clamp_tolerance(float(str(self.tolerance_var.get()).replace(",", ".")))
+        except Exception:
+            return
+        self._syncing_tolerance = True
+        try:
+            self.tolerance_scale_var.set(number)
+        finally:
+            self._syncing_tolerance = False
+
+    def _add_tolerance_control(self) -> None:
+        col = len(self.widgets)
+        cell = ttk.Frame(self.frame)
+        cell.grid(row=self.row_index, column=col, padx=2, pady=2, sticky="ew")
+        cell.columnconfigure(0, weight=1)
+
+        try:
+            initial = self._clamp_tolerance(float(str(self.tolerance_var.get()).replace(",", ".")))
+        except Exception:
+            initial = 12.0
+            self.tolerance_var.set("12")
+        self.tolerance_scale_var = tk.DoubleVar(value=initial)
+
+        scale = ttk.Scale(
+            cell,
+            from_=0,
+            to=255,
+            variable=self.tolerance_scale_var,
+            orient="horizontal",
+            command=self._on_tolerance_scale_changed,
+        )
+        scale.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        spin = ttk.Spinbox(cell, from_=0, to=255, increment=1, textvariable=self.tolerance_var, width=6)
+        spin.grid(row=0, column=1, sticky="e")
+
+        self.tolerance_var.trace_add("write", self._on_tolerance_text_changed)
+        self.widgets.append(cell)
 
     def remove(self) -> None:
         self.remove_callback(self)
