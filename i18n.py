@@ -34,9 +34,13 @@ FALLBACK_DE: dict[str, str] = {
     "status.ready": "Bereit",
     "status.no_intermediate": "Noch kein Zwischenbild uebernommen",
     "status.language_changed": "Sprache geaendert.",
+    "status.auto_from_image_done": "Auto-Einstellungen aus Bild gesetzt.",
+    "status.auto_from_image_textlogo": "Auto-Einstellungen: Text/Logo-Modus (Feindetails priorisiert).",
+    "status.auto_expert_done": "Expertenwerte automatisch aus Bild gesetzt.",
     "step1.input_image": "Input-Bild:",
     "step1.load_image": "Bild laden",
     "step1.save_png": "PNG speichern",
+    "step1.auto_from_image": "Auto aus Bild",
     "step1.actions": "Workflow / Abschluss Schritt 1",
     "step1.update_intermediate": "Zwischenbild nur aktualisieren",
     "step1.update_hint": "Hinweis: 'Weiter zur Vektorisierung' uebernimmt das bearbeitete Bild automatisch. Der Aktualisieren-Button ist nur optional.",
@@ -87,6 +91,8 @@ FALLBACK_DE: dict[str, str] = {
     "step2.detect_preview": "2  Erkennen / Vorschau",
     "step2.export": "3  Export DXF / SVG",
     "step2.actions_hint": "Auto-Werte ist optional und rechnet selbst eine Vorschau. Danach Vorschau pruefen oder direkt exportieren.",
+    "step2.auto_expert_from_image": "Auto-Werte vorschlagen (optional)",
+    "step2.live_preview": "Änderungen LIVE anzeigen",
     "step2.colors_layer": "Farben / Layer",
     "step2.edit_colors": "Farben / Layer bearbeiten",
     "step2.detect_colors_from_image": "Farben aus Bild erkennen",
@@ -109,7 +115,7 @@ FALLBACK_DE: dict[str, str] = {
     "step2.loose_points": "Lose Ankerpunkte entfernen",
     "step2.smooth": "Rundungen glaetten",
     "step2.global_epsilon": "Punktreduktion / Epsilon px",
-    "step2.apply_all_colors": "Auf alle Farben anwenden",
+    "step2.apply_all_colors": "Epsilon auf alle Farben anwenden",
     "step2.preprocess_enabled": "Vorverarbeitung aktiv",
     "step2.preprocess_blur": "Weichzeichnen / Blur",
     "step2.preprocess_edges": "Kanten beruhigen",
@@ -120,6 +126,11 @@ FALLBACK_DE: dict[str, str] = {
     "step2.smart_corner_angle": "Ecken schuetzen Grad",
     "step2.smart_line_tolerance": "Gerade Linien Toleranz px",
     "step2.smart_curve_strength": "Kurven-Glaettung",
+    "step2.hole_scale": "Lochgröße / Innenlöcher",
+    "step2.quick_preview": "Vorschau",
+    "step2.manual_refresh": "Vorschau manuell aktualisieren",
+    "step2.quick_export": "Export",
+    "step2.quick_colors": "Farben...",
     "step2.delete_small": "Kleine Objekte loeschen",
     "step2.percent_area": "% Bildflaeche",
     "step2.path_selection": "Pfad-Auswahl",
@@ -145,6 +156,12 @@ FALLBACK_DE: dict[str, str] = {
     "internal_scale.1x": "1x",
     "internal_scale.2x": "2x",
     "internal_scale.3x": "3x",
+    "ui.dark_mode": "Dark-Mode",
+    "ui.mode": "Modus:",
+    "ui.mode.simple": "Einfach",
+    "ui.mode.expert": "Experte",
+    "ui.theme.classic": "Klassisch (Illustrator/Corel-Style)",
+    "ui.theme.modern": "Modern",
     "dxf.compat.default": "Illustrator / CorelDRAW (empfohlen)",
     "dxf.compat.illustrator": "Adobe Illustrator",
     "dxf.compat.coreldraw": "CorelDRAW",
@@ -160,9 +177,28 @@ FALLBACK_DE: dict[str, str] = {
     "msg.no_image_edit": "Bitte zuerst ein Bild bearbeiten.",
     "msg.no_intermediate_title": "Kein Zwischenbild",
     "msg.no_intermediate_step": "Bitte zuerst Schritt 1 uebernehmen oder ein PNG direkt laden.",
+    "msg.no_intermediate_load_first": "Bitte zuerst ein Bild laden oder bearbeiten.",
     "msg.accepted_title": "Uebernommen",
     "msg.accepted": "Das bearbeitete Bild wurde fuer Schritt 2 uebernommen.",
+    "msg.profile_title": "Profil",
+    "msg.profile_unknown": "Unbekanntes Profil: {profile}",
+    "msg.recognize_error_title": "Fehler bei Erkennung",
+    "msg.auto_values_error_title": "Fehler bei Auto-Werten",
+    "msg.auto_expert_prompt_title": "Schritt 2 vorbereiten",
+    "msg.auto_expert_prompt": "Möchten Sie passende Expertenwerte für dieses Bild automatisch vorschlagen lassen?\n\nJa: Werte werden gesetzt und die Vorschau neu berechnet.\nNein: Aktuelle Werte bleiben unverändert.",
     "msg.export_done_title": "Export fertig",
+}
+
+FALLBACK_EN_PATCH: dict[str, str] = {
+    "step2.auto_expert_from_image": "Suggest Auto Values (Optional)",
+    "step2.hole_scale": "Hole size / inner holes",
+    "msg.auto_expert_prompt_title": "Prepare Step 2",
+    "msg.auto_expert_prompt": "Do you want Vektorrazor to suggest suitable expert values for this image?\n\nYes: values are applied and preview is recalculated.\nNo: current values stay unchanged.",
+    "msg.no_intermediate_load_first": "Please load or edit an image first.",
+    "msg.profile_title": "Profile",
+    "msg.profile_unknown": "Unknown profile: {profile}",
+    "msg.recognize_error_title": "Detection Error",
+    "msg.auto_values_error_title": "Auto Values Error",
 }
 
 
@@ -184,6 +220,25 @@ def validate_language_file(language_dict: dict[str, Any], fallback_dict: dict[st
     merged = dict(fallback_dict)
     merged.update(clean)
     return merged, missing
+
+
+def _normalize_german_texts(language_dict: dict[str, str]) -> None:
+    """Gezielte Korrekturen für ältere DE-Dateien ohne Umlaute."""
+    replacements = {
+        "step2.live_preview": FALLBACK_DE.get("step2.live_preview", ""),
+        "step2.auto_expert_from_image": FALLBACK_DE.get("step2.auto_expert_from_image", ""),
+        "step2.hole_scale": FALLBACK_DE.get("step2.hole_scale", ""),
+        "msg.auto_expert_prompt_title": FALLBACK_DE.get("msg.auto_expert_prompt_title", ""),
+        "msg.auto_expert_prompt": FALLBACK_DE.get("msg.auto_expert_prompt", ""),
+    }
+    for key, value in replacements.items():
+        if value:
+            language_dict[key] = value
+
+
+def _normalize_english_texts(language_dict: dict[str, str]) -> None:
+    for key, value in FALLBACK_EN_PATCH.items():
+        language_dict[key] = value
 
 
 def load_languages() -> None:
@@ -208,6 +263,10 @@ def load_languages() -> None:
                 if not isinstance(raw, dict):
                     raise ValueError("language root must be an object")
                 merged, missing = validate_language_file(raw, FALLBACK_DE)
+                if code == "de":
+                    _normalize_german_texts(merged)
+                elif code == "en":
+                    _normalize_english_texts(merged)
                 _languages[code] = merged
                 _language_names[code] = merged.get("language.name", code)
                 if missing:
@@ -263,4 +322,3 @@ def tr(key: str, default: str | None = None, **kwargs: Any) -> str:
         return value.format(**kwargs)
     except Exception:
         return value
-

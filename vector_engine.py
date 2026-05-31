@@ -61,6 +61,7 @@ class DetectedContour:
     points: List[Tuple[float, float]]
     area: float
     closed: bool = True
+    is_hole: bool = False
 
 
 PROFILE_ROWS: Dict[str, List[Tuple[str, str, str, str, bool, str, str]]] = {
@@ -555,6 +556,7 @@ def smooth_contours(
                 points=points,
                 area=contour.area,
                 closed=contour.closed,
+                is_hole=contour.is_hole,
             )
         )
     return result
@@ -800,9 +802,49 @@ def smart_smooth_contours(
                 points=new_points,
                 area=contour.area,
                 closed=contour.closed,
+                is_hole=contour.is_hole,
             )
         )
     return smoothed
+
+
+def scale_hole_contours(
+    contours: List[DetectedContour],
+    hole_scale: float
+) -> List[DetectedContour]:
+    """Skaliert nur Innenlöcher um ihren Schwerpunkt.
+
+    hole_scale < 1.0: Loch kleiner
+    hole_scale > 1.0: Loch größer
+    """
+    factor = max(0.20, min(2.50, float(hole_scale)))
+    if abs(factor - 1.0) < 1e-6:
+        return contours
+
+    scaled: List[DetectedContour] = []
+    for contour in contours:
+        if not contour.closed or not contour.is_hole or len(contour.points) < 3:
+            scaled.append(contour)
+            continue
+
+        points = [(float(x), float(y)) for x, y in contour.points]
+        cx = sum(x for x, _y in points) / len(points)
+        cy = sum(y for _x, y in points) / len(points)
+        new_points = [
+            (cx + (x - cx) * factor, cy + (y - cy) * factor)
+            for x, y in points
+        ]
+        new_area = max(0.0, float(contour.area) * factor * factor)
+        scaled.append(
+            DetectedContour(
+                rule=contour.rule,
+                points=new_points,
+                area=new_area,
+                closed=contour.closed,
+                is_hole=contour.is_hole,
+            )
+        )
+    return scaled
 
 
 def is_closed_path(points: List[Tuple[float, float]]) -> bool:
@@ -913,6 +955,13 @@ def dxf_layer_for_rule(rule: ColorRule, force_color_layers: bool = True) -> str:
     return color_layer_for_rule(rule, force_color_layers=force_color_layers)
 
 
+def _keep_hole_contour(contour: DetectedContour) -> bool:
+    """Innenloecher moeglichst erhalten, nur echte Kleinstartefakte verwerfen."""
+    if not getattr(contour, "is_hole", False):
+        return False
+    return contour_filter_area_px(contour) >= 1.5
+
+
 def remove_contours_smaller_than_mm2(
     contours: List[DetectedContour],
     min_area_mm2: float,
@@ -924,7 +973,7 @@ def remove_contours_smaller_than_mm2(
     return [
         contour
         for contour in contours
-        if contour_filter_area_mm2(contour, pixel_to_mm) >= min_area_mm2
+        if _keep_hole_contour(contour) or contour_filter_area_mm2(contour, pixel_to_mm) >= min_area_mm2
     ]
 
 
@@ -941,7 +990,7 @@ def remove_contours_smaller_than_percent(
     return [
         contour
         for contour in contours
-        if contour_filter_area_px(contour) >= min_area_px
+        if _keep_hole_contour(contour) or contour_filter_area_px(contour) >= min_area_px
     ]
 
 
@@ -1135,6 +1184,7 @@ def render_contours_to_mask(
     width, height = image_size
     mask = np.zeros((height, width), dtype=np.uint8)
 
+    # Erst Flaechen aufbauen, danach Loecher wieder ausstanzen.
     for contour in contours:
         if not contour.points:
             continue
@@ -1144,9 +1194,27 @@ def render_contours_to_mask(
             dtype=np.int32
         )
 
-        if contour.closed and len(pts) >= 3:
+        if contour.closed and len(pts) >= 3 and not contour.is_hole:
             cv2.fillPoly(mask, [pts], 255)
-        elif len(pts) >= 2:
+
+    for contour in contours:
+        if not contour.points or not contour.closed or not contour.is_hole:
+            continue
+        pts = np.array(
+            [[int(round(x)), int(round(y))] for x, y in contour.points],
+            dtype=np.int32
+        )
+        if len(pts) >= 3:
+            cv2.fillPoly(mask, [pts], 0)
+
+    for contour in contours:
+        if not contour.points:
+            continue
+        pts = np.array(
+            [[int(round(x)), int(round(y))] for x, y in contour.points],
+            dtype=np.int32
+        )
+        if not contour.closed and len(pts) >= 2:
             cv2.polylines(mask, [pts], isClosed=False, color=255, thickness=max(1, stroke_width))
 
     return mask
@@ -1197,18 +1265,27 @@ def find_contours_for_rule(
     mask = remove_small_components(mask, rule.min_area)
     mask = calm_mask_edges(mask, mask_edge_smoothing, mask_noise_area)
 
-    contours, _hierarchy = cv2.findContours(
+    contours, hierarchy = cv2.findContours(
         mask,
         cv2.RETR_CCOMP,
         cv2.CHAIN_APPROX_NONE
     )
 
     result: List[DetectedContour] = []
+    hierarchy_view = hierarchy[0] if hierarchy is not None and len(hierarchy) > 0 else None
 
-    for contour in contours:
+    for contour_index, contour in enumerate(contours):
+        parent = -1
+        if hierarchy_view is not None and contour_index < len(hierarchy_view):
+            parent = int(hierarchy_view[contour_index][3])
+        is_hole = parent != -1
         area = abs(cv2.contourArea(contour))
-        if area < rule.min_area:
-            continue
+        if is_hole:
+            if area < 2.0:
+                continue
+        else:
+            if area < rule.min_area:
+                continue
 
         pts = contour.reshape(-1, 2)
         if len(pts) < 3:
@@ -1230,7 +1307,7 @@ def find_contours_for_rule(
         if closed_paths_only and not is_closed_path(points):
             continue
 
-        result.append(DetectedContour(rule=rule, points=points, area=area))
+        result.append(DetectedContour(rule=rule, points=points, area=area, is_hole=is_hole))
 
     return result
 
@@ -1269,7 +1346,8 @@ def find_centerlines_for_rule(
                 rule=rule,
                 points=points,
                 area=float(len(points)),
-                closed=closed
+                closed=closed,
+                is_hole=False
             )
         )
 
@@ -1361,6 +1439,7 @@ def detect_all_contours(
                 points=[(x / scale, y / scale) for x, y in contour.points],
                 area=contour.area / area_scale,
                 closed=contour.closed,
+                is_hole=contour.is_hole,
             )
         )
     return restored
@@ -2629,4 +2708,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

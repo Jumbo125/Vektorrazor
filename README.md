@@ -13,7 +13,6 @@
   <a href="README.en.md">🇬🇧 English</a>
 </p>
 
-
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.9%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/GUI-Tkinter-brightgreen" alt="GUI">
@@ -24,6 +23,29 @@
 
 <p align="center"><strong>Copyright (C) 2026 Andreas Rottmann</strong></p>
 
+---
+
+## Version 2 – Update
+
+Version 2 focuses on a cleaner workflow, better usability and improved preview quality.
+
+### New and improved
+
+- Bugfixes and stability improvements
+- Added Dark Mode
+- Added Light Mode
+- Added intelligent auto-detect expert option
+- Reduced and improved UI for a smarter, more user-friendly workflow
+- Added zoom for both original image and preview
+- Added live changes / live preview while adjusting settings
+- Added refresh button
+- Improved UI inspired by typical graphics software, as far as possible with Tkinter
+- Linux canvas fix
+- Fixed German umlauts
+- Preview image is now more vector-based and less pixelated when zooming
+
+---
+
 ## Schnellstart
 
 Deutsch: [README.de.md](README.de.md)  
@@ -33,11 +55,7 @@ English: [README.en.md](README.en.md)
 
 ```bat
 pyinstaller --onefile --windowed --clean --name Vektorrazor --icon assets\\vektorrazor.ico --add-data "assets\\vektorrazor.ico;assets" --add-data "assets\\vektorrazor_icon.png;assets" main.py
-```
 
-Das Icon liegt unter `assets/vektorrazor.ico` und wird mit `--icon` in die EXE eingebettet.  
-Für das Tkinter-Fenster wird dasselbe Icon zusätzlich per `--add-data` mitgeliefert.
+## Windows EXE
 
-## Lizenz
-
-GPL-3.0, siehe [LICENSE](LICENSE).
+In den Relaeses zu finden

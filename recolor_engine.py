@@ -126,7 +126,13 @@ def make_checker_background(size: Tuple[int, int], tile: int = 12) -> Image.Imag
 
 def image_for_display(image: Image.Image, size: Tuple[int, int]) -> Image.Image:
     """Bild fuer Tkinter anzeigen, transparente Bereiche sichtbar machen."""
-    resized = image.resize(size, Image.Resampling.NEAREST)
+    # Für Vorschau/Zoom nicht mit NEAREST skalieren, sonst wirkt es stark verpixelt.
+    # Beim Vergrößern BICUBIC, beim Verkleinern LANCZOS.
+    src_w, src_h = image.size
+    dst_w, dst_h = size
+    upsample = dst_w >= src_w or dst_h >= src_h
+    resample = Image.Resampling.BICUBIC if upsample else Image.Resampling.LANCZOS
+    resized = image.resize(size, resample)
     if resized.mode != "RGBA":
         return resized.convert("RGB")
 
@@ -205,9 +211,13 @@ class ZoomImageCanvas(ttk.Frame):
         parent: tk.Widget,
         title: str,
         picker_callback: Optional[Callable[[RGB, int, int], None]] = None,
+        zoom_callback: Optional[Callable[[float], None]] = None,
+        overlay_draw_callback: Optional[Callable[["ZoomImageCanvas"], None]] = None,
     ) -> None:
         super().__init__(parent)
         self.picker_callback = picker_callback
+        self.zoom_callback = zoom_callback
+        self.overlay_draw_callback = overlay_draw_callback
         self.image: Optional[Image.Image] = None
         self.tk_image: Optional[ImageTk.PhotoImage] = None
         self.zoom = 1.0
@@ -258,11 +268,19 @@ class ZoomImageCanvas(ttk.Frame):
         if self.image is None:
             return
         # Wichtig: Wenn das Canvas gerade erst aufgebaut wurde, liefert Tk manchmal noch 1x1 px.
-        # Dann waere die Vorschau praktisch unsichtbar. Darum kurz Layout aktualisieren
-        # und notfalls mit einer sinnvollen Mindestgroesse rechnen.
+        # Auf Linux/Wayland kann das zu falschem Offset fuehren (Bild "unsichtbar").
+        # Deshalb nicht auf grosse Fixwerte erzwingen, sondern bei zu kleiner Flaeche kurz spaeter erneut fitten.
         self.update_idletasks()
-        cw = max(600, self.canvas.winfo_width())
-        ch = max(350, self.canvas.winfo_height())
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        if cw <= 2 or ch <= 2:
+            rw = self.canvas.winfo_reqwidth()
+            rh = self.canvas.winfo_reqheight()
+            cw = max(240, int(rw) if rw else 0)
+            ch = max(180, int(rh) if rh else 0)
+        if cw <= 2 or ch <= 2:
+            self.after(30, self.fit_to_canvas)
+            return
         iw, ih = self.image.size
         if iw <= 0 or ih <= 0:
             return
@@ -272,6 +290,33 @@ class ZoomImageCanvas(ttk.Frame):
         self.offset_x = (cw - iw * self.zoom) / 2
         self.offset_y = (ch - ih * self.zoom) / 2
         self.render()
+        self._notify_zoom_changed()
+
+    def _notify_zoom_changed(self) -> None:
+        if self.zoom_callback is None:
+            return
+        try:
+            self.zoom_callback(float(self.zoom))
+        except Exception:
+            pass
+
+    def set_zoom(self, zoom: float) -> None:
+        if self.image is None:
+            return
+        old_zoom = max(0.0001, float(self.zoom))
+        new_zoom = self._safe_zoom(float(zoom))
+        if abs(new_zoom - old_zoom) < 0.0001:
+            return
+
+        cx = self.canvas.winfo_width() * 0.5
+        cy = self.canvas.winfo_height() * 0.5
+        img_x = (cx - self.offset_x) / old_zoom
+        img_y = (cy - self.offset_y) / old_zoom
+        self.zoom = new_zoom
+        self.offset_x = cx - img_x * new_zoom
+        self.offset_y = cy - img_y * new_zoom
+        self.render()
+        self._notify_zoom_changed()
 
     def _safe_zoom(self, requested_zoom: float) -> float:
         if self.image is None:
@@ -285,12 +330,25 @@ class ZoomImageCanvas(ttk.Frame):
 
     def render(self) -> None:
         self.canvas.delete("all")
+        cw = max(1, self.canvas.winfo_width())
+        ch = max(1, self.canvas.winfo_height())
+        canvas_bg = str(self.canvas.cget("bg") or "").strip()
+        text_fill = "white"
+        if canvas_bg.startswith("#") and len(canvas_bg) == 7:
+            try:
+                r = int(canvas_bg[1:3], 16)
+                g = int(canvas_bg[3:5], 16)
+                b = int(canvas_bg[5:7], 16)
+                luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+                text_fill = "#111111" if luminance > 150 else "#f3f3f3"
+            except Exception:
+                text_fill = "white"
         if self.image is None:
             self.canvas.create_text(
-                self.canvas.winfo_width() // 2,
-                self.canvas.winfo_height() // 2,
+                cw // 2,
+                ch // 2,
                 text="Kein Bild geladen",
-                fill="white",
+                fill=text_fill,
                 font=("Segoe UI", 12),
             )
             return
@@ -303,10 +361,15 @@ class ZoomImageCanvas(ttk.Frame):
         display_img = image_for_display(self.image, (dw, dh))
         self.tk_image = ImageTk.PhotoImage(display_img)
         self.canvas.create_image(int(self.offset_x), int(self.offset_y), anchor="nw", image=self.tk_image)
+        if self.overlay_draw_callback is not None:
+            try:
+                self.overlay_draw_callback(self)
+            except Exception:
+                pass
 
         # kleiner Zoom-Hinweis unten links
-        self.canvas.create_rectangle(4, self.canvas.winfo_height() - 26, 96, self.canvas.winfo_height() - 4, fill="#111111", outline="")
-        self.canvas.create_text(50, self.canvas.winfo_height() - 15, text=f"Zoom {self.zoom:.2f}x", fill="white")
+        self.canvas.create_rectangle(4, ch - 26, 96, ch - 4, fill="#111111", outline="")
+        self.canvas.create_text(50, ch - 15, text=f"Zoom {self.zoom:.2f}x", fill="white")
 
     def _on_mousewheel(self, event: tk.Event) -> None:
         if self.image is None:
@@ -330,6 +393,7 @@ class ZoomImageCanvas(ttk.Frame):
         self.offset_x = event.x - img_x * new_zoom
         self.offset_y = event.y - img_y * new_zoom
         self.render()
+        self._notify_zoom_changed()
 
     def _pick_pixel_at_canvas_pos(self, canvas_x: int, canvas_y: int) -> None:
         if self.image is None or self.picker_callback is None:
@@ -385,17 +449,24 @@ class ZoomImageCanvas(ttk.Frame):
 # -----------------------------------------------------------------------------
 
 class ScrollableFrame(ttk.Frame):
-    def __init__(self, parent: tk.Widget, height: int = 130) -> None:
+    def __init__(self, parent: tk.Widget, height: int = 130, horizontal: bool = False) -> None:
         super().__init__(parent)
+        self.horizontal = bool(horizontal)
         self.canvas = tk.Canvas(self, height=height, highlightthickness=0)
         self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.h_scrollbar: Optional[ttk.Scrollbar] = None
         self.inner = ttk.Frame(self.canvas)
 
         self.window_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        if self.horizontal:
+            self.h_scrollbar = ttk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
+            self.canvas.configure(xscrollcommand=self.h_scrollbar.set)
 
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self.scrollbar.grid(row=0, column=1, sticky="ns")
+        if self.h_scrollbar is not None:
+            self.h_scrollbar.grid(row=1, column=0, sticky="ew")
         self.rowconfigure(0, weight=1)
         self.columnconfigure(0, weight=1)
 
@@ -410,9 +481,20 @@ class ScrollableFrame(ttk.Frame):
 
     def _on_inner_configure(self, _event: tk.Event) -> None:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        if self.horizontal:
+            try:
+                cw = max(1, self.canvas.winfo_width())
+                iw = max(1, self.inner.winfo_reqwidth())
+                self.canvas.itemconfigure(self.window_id, width=max(cw, iw))
+            except Exception:
+                pass
 
     def _on_canvas_configure(self, event: tk.Event) -> None:
-        self.canvas.itemconfigure(self.window_id, width=event.width)
+        if self.horizontal:
+            iw = max(1, self.inner.winfo_reqwidth())
+            self.canvas.itemconfigure(self.window_id, width=max(event.width, iw))
+        else:
+            self.canvas.itemconfigure(self.window_id, width=event.width)
 
     def _on_mousewheel(self, event: tk.Event) -> None:
         if getattr(event, "num", None) == 4:
@@ -1444,4 +1526,3 @@ class RecolorApp(tk.Tk):
 if __name__ == "__main__":
     app = RecolorApp()
     app.mainloop()
-
