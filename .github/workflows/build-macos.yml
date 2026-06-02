@@ -1,0 +1,86 @@
+name: Build macOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "main.py"
+      - "workflow_app.py"
+      - "vector_engine.py"
+      - "recolor_engine.py"
+      - "i18n.py"
+      - "requirements.txt"
+      - "requirements_build.txt"
+      - "Vektorrazor.spec"
+      - "assets/**"
+      - "lang/**"
+      - ".github/workflows/build-macos.yml"
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements_build.txt
+
+      - name: Build with PyInstaller
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(
+            --onefile
+            --windowed
+            --clean
+            --name Vektorrazor
+            --hidden-import=PIL._tkinter_finder
+            --hidden-import=PIL.ImageTk
+            --collect-submodules=PIL
+          )
+
+          if [[ -f "assets/vektorrazor_icon.png" ]]; then
+            args+=(--add-data "assets/vektorrazor_icon.png:assets")
+          fi
+          if [[ -f "assets/vektorrazor.ico" ]]; then
+            args+=(--add-data "assets/vektorrazor.ico:assets")
+          fi
+          if [[ -d "lang" ]]; then
+            args+=(--add-data "lang:lang")
+          fi
+
+          python -m PyInstaller "${args[@]}" main.py
+
+      - name: Prepare artifact folder
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact/Vektorrazor-macOS
+          cp dist/Vektorrazor artifact/Vektorrazor-macOS/
+          [[ -f README.md ]] && cp README.md artifact/Vektorrazor-macOS/
+          [[ -f README.de.md ]] && cp README.de.md artifact/Vektorrazor-macOS/
+          [[ -f README.en.md ]] && cp README.en.md artifact/Vektorrazor-macOS/
+          [[ -f NOTICE.md ]] && cp NOTICE.md artifact/Vektorrazor-macOS/
+          [[ -f LICENSE ]] && cp LICENSE artifact/Vektorrazor-macOS/
+          if [[ -d lang ]]; then
+            cp -R lang artifact/Vektorrazor-macOS/
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vektorrazor-macOS
+          path: artifact/Vektorrazor-macOS
