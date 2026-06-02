@@ -27,22 +27,61 @@
 
 ## Version 2 – Update
 
-Version 2 focuses on a cleaner workflow, better usability and improved preview quality.
+Dieses Release verbessert den gesamten Workflow, die Bedienbarkeit und die Vorschauqualität von Vektorrazor.
 
-### New and improved
+### Highlights
 
-- Bugfixes and stability improvements
+- Dark Mode hinzugefügt
+- Light Mode hinzugefügt
+- Intelligente Auto-Ermittlung für Expertenwerte hinzugefügt
+- UI reduziert und verbessert für einen einfacheren, übersichtlicheren Workflow
+- Vorschau-Layer / Vorschau-Modi erweitert, unter anderem für Objektcheck, Konturen, Masken und Schnitt-/Fallteil-Risiko
+- Parameter-Infos ergänzt, damit Vorverarbeitung, Smart CAD Smoothing und intelligente Brücken direkt im Programm erklärt werden
+- Intelligente Brücken hinzugefügt, damit Inneninseln und kleine ausgeschnittene Teile beim Schneiden besser mit dem Material verbunden bleiben können
+- Zoom für Originalbild und Vektorvorschau hinzugefügt
+- Gemeinsame Zoom-Funktion für Original und Vorschau verbessert
+- Live-Vorschau beim Ändern von Einstellungen hinzugefügt
+- Manueller Refresh-Button für die Vorschau hinzugefügt
+- UI stärker an bekannte Grafik- und Zeichenprogramme angelehnt, soweit mit Tkinter sinnvoll möglich
+- Vektorbasierte Vorschauqualität verbessert, dadurch weniger verpixelt beim Zoomen
+- Multilanguage-System erweitert
+- Deutsche Umlaute korrigiert
+- Linux-Canvas-Probleme behoben
+- Allgemeine Bugfixes und Stabilitätsverbesserungen
+- Mac OS Build
+### Hinweise
+
+Vektorrazor ist weiterhin ein Prototyp mit Fokus auf CAD-orientierte Vektorvorbereitung und Export-Workflows.
+
+
+## Vektorrazor v2
+
+This release improves the overall workflow, usability and preview quality of Vektorrazor.
+
+### Highlights
+
 - Added Dark Mode
 - Added Light Mode
 - Added intelligent auto-detect expert option
-- Reduced and improved UI for a smarter, more user-friendly workflow
-- Added zoom for both original image and preview
-- Added live changes / live preview while adjusting settings
-- Added refresh button
-- Improved UI inspired by typical graphics software, as far as possible with Tkinter
-- Linux canvas fix
+- Reduced and improved UI for a smarter and more user-friendly workflow
+- Added extended preview layers / preview modes, including object check, contours, masks and cut/dropout risk
+- Added parameter info dialogs so preprocessing, Smart CAD Smoothing and intelligent bridges are explained directly inside the program
+- Added intelligent bridges to help keep inner islands and small cutout parts connected to the material during cutting
+- Added zoom for both original image and vector preview
+- Improved shared zoom behavior for original image and preview
+- Added live preview while changing settings
+- Added manual refresh button
+- Improved graphics-program-style UI as far as possible with Tkinter
+- Improved vector-based preview quality, less pixelated when zooming
+- Extended multilingual support
 - Fixed German umlauts
-- Preview image is now more vector-based and less pixelated when zooming
+- Fixed Linux canvas issues
+- General bugfixes and stability improvements
+- Mac OS Build
+
+### Notes
+
+Vektorrazor is still a prototype focused on CAD-oriented vector preparation and export workflows.
 
 ---
 

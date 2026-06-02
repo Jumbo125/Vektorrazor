@@ -75,7 +75,7 @@ DXF_COMPATIBILITY_PRESETS = {
 
 DXF_COMPATIBILITY_KEYS = list(DXF_COMPATIBILITY_PRESETS.keys())
 VECTOR_MODE_KEYS = ["area", "centerline"]
-PREVIEW_MODE_KEYS = ["object", "contour", "mask"]
+PREVIEW_MODE_KEYS = ["object", "contour", "mask", "cut_risk"]
 CLEANUP_MODE_KEYS = ["off", "mm2", "percent"]
 INTERNAL_SCALE_KEYS = ["1", "2", "3"]
 UI_THEME_KEYS = ["classic", "modern"]
@@ -367,6 +367,10 @@ class WorkflowApp(tk.Tk):
         self.smart_line_tolerance_var = tk.StringVar(value="1.0")
         self.smart_curve_strength_var = tk.StringVar(value="2")
         self.hole_scale_var = tk.StringVar(value="1.000")
+        self.bridge_tabs_var = tk.BooleanVar(value=False)
+        self.bridge_width_mm_var = tk.StringVar(value="1.000")
+        self.bridge_width_percent_var = tk.StringVar(value="0.000")
+        self.bridge_count_var = tk.StringVar(value="2.000")
         self.live_preview_var = tk.BooleanVar(value=True)
         self.cleanup_mode_var = tk.StringVar(value="off")
         self.cleanup_mode_display_var = tk.StringVar()
@@ -378,7 +382,7 @@ class WorkflowApp(tk.Tk):
         self.selected_contour_indices: set[int] = set()
         self.vector_select_press: Optional[Tuple[int, int, str]] = None
         self.vector_selection_mode_var = tk.BooleanVar(value=False)
-        self.selected_contour_text_var = tk.StringVar(value="Kein Pfad ausgewählt")
+        self.selected_contour_text_var = tk.StringVar(value=tr("status.no_path_selected"))
         self.step2_shared_zoom_var = tk.DoubleVar(value=1.0)
         self._syncing_step2_zoom = False
         self.step2_auto_prompt_pending = True
@@ -438,6 +442,10 @@ class WorkflowApp(tk.Tk):
             self.smart_curve_strength_var,
             self.global_tolerance_var,
             self.hole_scale_var,
+            self.bridge_tabs_var,
+            self.bridge_width_mm_var,
+            self.bridge_width_percent_var,
+            self.bridge_count_var,
             self.cleanup_mode_var,
             self.min_object_area_mm2_var,
             self.min_object_percent_var,
@@ -1257,7 +1265,13 @@ class WorkflowApp(tk.Tk):
         ttk.Checkbutton(opts, text="Rundungen glätten", variable=self.smooth_contours_var).grid(row=20, column=2, sticky="w", pady=(8, 0))
         ttk.Scale(opts, from_=0, to=5, variable=self.smooth_strength_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.smooth_strength_var, value, 3)).grid(row=20, column=3, sticky="ew", padx=(4, 4), pady=(8, 0))
         ttk.Spinbox(opts, from_=0, to=5, increment=0.001, textvariable=self.smooth_strength_var, width=8, format="%.3f").grid(row=20, column=4, sticky="w", padx=(4, 0), pady=(8, 0))
-        ttk.Checkbutton(opts, text="Vorverarbeitung aktiv", variable=self.preprocess_vector_var).grid(row=8, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(opts, text="Vorverarbeitung aktiv", variable=self.preprocess_vector_var).grid(row=8, column=0, sticky="w", pady=(8, 0))
+        ttk.Button(
+            opts,
+            text="?",
+            width=3,
+            command=lambda: self.show_i18n_info("msg.preprocess_info_title", "msg.preprocess_info_body"),
+        ).grid(row=8, column=1, sticky="w", padx=(4, 0), pady=(8, 0))
         ttk.Label(opts, text="Weichzeichnen / Blur").grid(row=9, column=0, sticky="w", pady=(2, 0))
         ttk.Scale(opts, from_=0.0, to=3.0, variable=self.preprocess_blur_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.preprocess_blur_var, value, 3)).grid(row=9, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
         ttk.Spinbox(opts, from_=0.0, to=3.0, increment=0.001, textvariable=self.preprocess_blur_var, width=8, format="%.3f").grid(row=9, column=2, sticky="w", pady=(2, 0))
@@ -1272,7 +1286,13 @@ class WorkflowApp(tk.Tk):
         self.internal_scale_box.grid(row=12, column=1, sticky="w", padx=(4, 12), pady=(2, 0))
         self.internal_scale_box.bind("<<ComboboxSelected>>", lambda _event: self.on_internal_scale_display_changed())
         # Manuelle Vorschau-Aktualisierung erfolgt jetzt im Farben/Layer-Frame per Refresh-Button.
-        ttk.Checkbutton(opts, text="Smart CAD Smoothing", variable=self.smart_smoothing_var).grid(row=13, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(opts, text="Smart CAD Smoothing", variable=self.smart_smoothing_var).grid(row=13, column=0, sticky="w", pady=(8, 0))
+        ttk.Button(
+            opts,
+            text="?",
+            width=3,
+            command=lambda: self.show_i18n_info("msg.smart_smoothing_info_title", "msg.smart_smoothing_info_body"),
+        ).grid(row=13, column=1, sticky="w", padx=(4, 0), pady=(8, 0))
         ttk.Label(opts, text="Ecken schützen °").grid(row=14, column=0, sticky="w", pady=(2, 0))
         ttk.Scale(opts, from_=10, to=120, variable=self.smart_corner_angle_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.smart_corner_angle_var, value, 3)).grid(row=14, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
         ttk.Spinbox(opts, from_=10, to=120, increment=0.001, textvariable=self.smart_corner_angle_var, width=8, format="%.3f").grid(row=14, column=2, sticky="w", pady=(2, 0))
@@ -1294,6 +1314,30 @@ class WorkflowApp(tk.Tk):
             command=lambda value: self._set_numeric_var(self.hole_scale_var, value, 3),
         ).grid(row=5, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
         ttk.Spinbox(opts, from_=0.5, to=1.5, increment=0.001, textvariable=self.hole_scale_var, width=8, format="%.3f").grid(row=5, column=2, sticky="w", pady=(2, 0))
+        bridge_check = ttk.Checkbutton(opts, text=tr("step2.bridge_tabs"), variable=self.bridge_tabs_var)
+        bridge_check.grid(row=22, column=0, sticky="w", pady=(10, 0))
+        self._register_i18n(bridge_check, "text", "step2.bridge_tabs")
+        ttk.Button(
+            opts,
+            text="?",
+            width=3,
+            command=lambda: self.show_i18n_info("msg.bridge_tabs_info_title", "msg.bridge_tabs_info_body"),
+        ).grid(row=22, column=1, sticky="w", padx=(4, 0), pady=(10, 0))
+        bridge_mm_label = ttk.Label(opts, text=tr("step2.bridge_width_mm"))
+        bridge_mm_label.grid(row=23, column=0, sticky="w", pady=(2, 0))
+        self._register_i18n(bridge_mm_label, "text", "step2.bridge_width_mm")
+        ttk.Scale(opts, from_=0.0, to=10.0, variable=self.bridge_width_mm_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.bridge_width_mm_var, value, 3)).grid(row=23, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
+        ttk.Spinbox(opts, from_=0.0, to=10.0, increment=0.001, textvariable=self.bridge_width_mm_var, width=8, format="%.3f").grid(row=23, column=2, sticky="w", pady=(2, 0))
+        bridge_percent_label = ttk.Label(opts, text=tr("step2.bridge_width_percent"))
+        bridge_percent_label.grid(row=24, column=0, sticky="w", pady=(2, 0))
+        self._register_i18n(bridge_percent_label, "text", "step2.bridge_width_percent")
+        ttk.Scale(opts, from_=0.0, to=5.0, variable=self.bridge_width_percent_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.bridge_width_percent_var, value, 3)).grid(row=24, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
+        ttk.Spinbox(opts, from_=0.0, to=5.0, increment=0.001, textvariable=self.bridge_width_percent_var, width=8, format="%.3f").grid(row=24, column=2, sticky="w", pady=(2, 0))
+        bridge_count_label = ttk.Label(opts, text=tr("step2.bridge_count"))
+        bridge_count_label.grid(row=25, column=0, sticky="w", pady=(2, 0))
+        self._register_i18n(bridge_count_label, "text", "step2.bridge_count")
+        ttk.Scale(opts, from_=1.0, to=8.0, variable=self.bridge_count_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.bridge_count_var, value, 3)).grid(row=25, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
+        ttk.Spinbox(opts, from_=1.0, to=8.0, increment=1.000, textvariable=self.bridge_count_var, width=8, format="%.3f").grid(row=25, column=2, sticky="w", pady=(2, 0))
         ttk.Label(opts, text="Kleine Objekte löschen").grid(row=18, column=0, sticky="w", pady=(8, 0))
         self.cleanup_mode_box = ttk.Combobox(opts, textvariable=self.cleanup_mode_display_var, values=[self._cleanup_label(key) for key in CLEANUP_MODE_KEYS], state="readonly", width=12)
         self.cleanup_mode_box.grid(row=18, column=1, sticky="w", padx=(4, 12), pady=(8, 0))
@@ -1480,6 +1524,9 @@ class WorkflowApp(tk.Tk):
     def back_step(self) -> None:
         self.show_step(0)
 
+    def show_i18n_info(self, title_key: str, body_key: str) -> None:
+        messagebox.showinfo(tr(title_key), tr(body_key))
+
     def on_enter_step2(self) -> None:
         if self.vector_image_rgb is None:
             return
@@ -1657,7 +1704,7 @@ class WorkflowApp(tk.Tk):
             info = child.grid_info()
             row = int(info.get("row", 0))
             if simple:
-                if row in (0, 1, 4, 9, 14):
+                if row in (0, 1, 4, 9, 14, 17):
                     child.grid()
                 else:
                     child.grid_remove()
@@ -1860,7 +1907,7 @@ class WorkflowApp(tk.Tk):
         value = str(self.global_epsilon_var.get()).replace(",", ".")
         for row in self.vector_rows:
             row.epsilon_var.set(value)
-        self.status_var.set(f"Epsilon auf alle Farben angewendet: {value}")
+        self.status_var.set(tr("status.epsilon_applied_all", value=value))
 
     def apply_global_tolerance_to_rows(self) -> None:
         text = str(self.global_tolerance_var.get()).replace(",", ".")
@@ -1872,7 +1919,7 @@ class WorkflowApp(tk.Tk):
         for row in self.vector_rows:
             row.tolerance_var.set(str(value))
         self.global_tolerance_var.set(str(value))
-        self.status_var.set(f"Toleranz auf alle Farben angewendet: {value}")
+        self.status_var.set(tr("status.tolerance_applied_all", value=value))
 
     def on_global_tolerance_slider_changed(self, value: str) -> None:
         self._set_numeric_var(self.global_tolerance_var, value, 0)
@@ -1903,6 +1950,10 @@ class WorkflowApp(tk.Tk):
         self.global_epsilon_var.set("0.030")
         self.global_tolerance_var.set("200")
         self.hole_scale_var.set("1.000")
+        self.bridge_tabs_var.set(False)
+        self.bridge_width_mm_var.set("1.000")
+        self.bridge_width_percent_var.set("0.000")
+        self.bridge_count_var.set("2.000")
         self.min_object_area_mm2_var.set("0")
         self.min_object_percent_var.set("0,00")
 
@@ -2147,26 +2198,23 @@ class WorkflowApp(tk.Tk):
                 self.step1_notebook.select(self.logo_tab)
             except Exception:
                 pass
-            msg = (
-                "Dieses Bild wirkt wie ein helles/graues Logo auf hellem oder verlaufendem Hintergrund.\n\n"
-                "Empfehlung: Logo-Maske erzeugen.\n"
-                "Die Werte wurden aus dem Bild berechnet, nicht fix gesetzt.\n\n"
-                f"Vorschlag:\n- Logo-Schwelle: {threshold}\n- Hintergrund-Radius: {blur}\n"
-                f"- geschätzte Maskenfläche: ca. {coverage:.1f}%\n"
-                f"- Zielbereich laut Analyse: ca. {target:.1f}%\n\n"
-                "Jetzt anwenden?\n\n"
-                "Nein = nur im passenden Tab bleiben, Werte werden nicht geändert."
+            msg = tr(
+                "msg.step1_recommend_mask",
+                threshold=threshold,
+                blur=blur,
+                coverage=coverage,
+                target=target,
             )
-            if messagebox.askyesno("Empfehlung für Schritt 1", msg, default=messagebox.YES, icon=messagebox.QUESTION):
+            if messagebox.askyesno(tr("msg.step1_recommend_title"), msg, default=messagebox.YES, icon=messagebox.QUESTION):
                 self.logo_mask_threshold_var.set(threshold)
                 self.logo_mask_blur_var.set(blur)
                 self.logo_mask_clean_var.set(True)
                 self.logo_mask_fg_var.set("0,0,0")
                 self.logo_mask_bg_var.set("255,255,255")
                 self.create_logo_mask_preview()
-                self.status_var.set(f"Empfehlung angewendet: Logo-Maske mit Schwelle {threshold}, Radius {blur}.")
+                self.status_var.set(tr("status.step1_recommend_mask_applied", threshold=threshold, blur=blur))
             else:
-                self.status_var.set("Empfehlung: Logo-Maske. Werte wurden nicht geändert.")
+                self.status_var.set(tr("status.step1_recommend_mask_skipped"))
             return
 
         if bw_lineart_like:
@@ -2175,23 +2223,16 @@ class WorkflowApp(tk.Tk):
             except Exception:
                 pass
             threshold = 30 if stats["dynamic"] > 180 else 40
-            msg = (
-                "Dieses Bild wirkt wie kontrastreiches Schwarz/Weiß-Lineart.\n\n"
-                "Empfehlung: Farben auf Schwarz/Weiß reduzieren und feine Details erhalten.\n"
-                f"Vorschlag:\n- Schwelle: {threshold}\n- Max. Farben: 2\n- Mindestfläche: 1\n"
-                "- später in Schritt 2 Konturlinien prüfen\n\n"
-                "Jetzt anwenden?\n\n"
-                "Nein = nur im passenden Tab bleiben, Werte werden nicht geändert."
-            )
-            if messagebox.askyesno("Empfehlung für Schritt 1", msg, default=messagebox.YES, icon=messagebox.QUESTION):
+            msg = tr("msg.step1_recommend_bw", threshold=threshold)
+            if messagebox.askyesno(tr("msg.step1_recommend_title"), msg, default=messagebox.YES, icon=messagebox.QUESTION):
                 self.basic_threshold_var.set(threshold)
                 self.basic_min_area_var.set(1)
                 self.basic_max_colors_var.set(2)
                 self.basic_alpha_var.set(10)
                 self.detect_basic_colors(show_busy=True)
-                self.status_var.set("Empfehlung angewendet: Schwarz/Weiß-Lineart vorbereitet.")
+                self.status_var.set(tr("status.step1_recommend_bw_applied"))
             else:
-                self.status_var.set("Empfehlung: Schwarz/Weiß-Lineart. Werte wurden nicht geändert.")
+                self.status_var.set(tr("status.step1_recommend_bw_skipped"))
             return
 
         if color_like:
@@ -2202,40 +2243,28 @@ class WorkflowApp(tk.Tk):
             suggested_colors = 8 if stats["sat_p95"] < 0.30 else 12
             threshold = 14 if stats["edge_density"] > 0.08 else 18
             min_area = 5 if stats["edge_density"] > 0.08 else 10
-            msg = (
-                "Dieses Bild enthält mehrere echte Farben.\n\n"
-                "Empfehlung: Farben reduzieren und technische Ziel-RGBs zuweisen.\n"
-                f"Vorschlag:\n- Schwelle: {threshold}\n- Max. Farben: {suggested_colors}\n- Mindestfläche: {min_area}\n"
-                "Danach die Farbtabelle prüfen.\n\n"
-                "Jetzt anwenden?\n\n"
-                "Nein = nur im passenden Tab bleiben, Werte werden nicht geändert."
-            )
-            if messagebox.askyesno("Empfehlung für Schritt 1", msg, default=messagebox.YES, icon=messagebox.QUESTION):
+            msg = tr("msg.step1_recommend_color", threshold=threshold, suggested_colors=suggested_colors, min_area=min_area)
+            if messagebox.askyesno(tr("msg.step1_recommend_title"), msg, default=messagebox.YES, icon=messagebox.QUESTION):
                 self.basic_threshold_var.set(threshold)
                 self.basic_min_area_var.set(min_area)
                 self.basic_max_colors_var.set(suggested_colors)
                 self.basic_alpha_var.set(10)
                 self.detect_basic_colors(show_busy=True)
-                self.status_var.set("Empfehlung angewendet: Farben reduzieren.")
+                self.status_var.set(tr("status.step1_recommend_color_applied"))
             else:
-                self.status_var.set("Empfehlung: Farben reduzieren. Werte wurden nicht geändert.")
+                self.status_var.set(tr("status.step1_recommend_color_skipped"))
             return
 
         try:
             self.step1_notebook.select(self.manual_tab)
         except Exception:
             pass
-        msg = (
-            "Das Bild passt zu keinem eindeutigen Automatikmodus.\n\n"
-            "Empfehlung: Manuelle Farbumsetzung.\n"
-            "Du kannst im Originalbild eine Farbe anklicken und die Ziel-RGB-Farbe gezielt setzen.\n\n"
-            "Der passende Tab wurde bereits geöffnet."
-        )
+        msg = tr("msg.step1_recommend_manual")
         try:
-            messagebox.showinfo("Empfehlung für Schritt 1", msg)
+            messagebox.showinfo(tr("msg.step1_recommend_title"), msg)
         except Exception:
             pass
-        self.status_var.set("Keine eindeutige Automatik erkannt: Manuelle Farbumsetzung empfohlen.")
+        self.status_var.set(tr("status.step1_recommend_manual"))
 
     # ------------------------------------------------------------------ Schritt 1 Logik
     def choose_input_image(self) -> None:
@@ -2248,10 +2277,7 @@ class WorkflowApp(tk.Tk):
             self.load_input_image(path)
 
     def load_input_image(self, path: str) -> None:
-        self.show_busy_dialog(
-            "Bild wird geladen",
-            "Bild wird geladen und analysiert...\n\nBitte kurz warten. Währenddessen sind Klicks blockiert.",
-        )
+        self.show_busy_dialog(tr("msg.busy_load_image_title"), tr("msg.busy_load_image_body"))
         try:
             try:
                 img = Image.open(path).convert("RGBA")
@@ -2268,7 +2294,7 @@ class WorkflowApp(tk.Tk):
             self.step1_edited_canvas.set_image(self.edited_image, reset_view=True)
             if not self.output_path_var.get():
                 self.output_path_var.set(str(self.current_path.with_suffix(".dxf")))
-            self.status_var.set(f"Bild geladen: {self.current_path.name} | {img.width} x {img.height}px")
+            self.status_var.set(tr("status.image_loaded", name=self.current_path.name, width=img.width, height=img.height))
             if self.step1_notebook.index(self.step1_notebook.select()) == 0:
                 self.detect_basic_colors(show_busy=False)
             else:
@@ -2497,10 +2523,7 @@ class WorkflowApp(tk.Tk):
             messagebox.showwarning(tr("msg.no_image_title"), tr("msg.no_image_load"))
             return
         if show_busy:
-            self.show_busy_dialog(
-                "Farben werden erkannt",
-                "Farben und Flächen werden analysiert...\n\nBitte kurz warten.",
-            )
+            self.show_busy_dialog(tr("msg.busy_detect_colors_title"), tr("msg.busy_detect_colors_body"))
         try:
             try:
                 base = self.get_prepared_image(force=True)
@@ -2512,12 +2535,12 @@ class WorkflowApp(tk.Tk):
                     alpha_min=max(0, min(255, int(self.basic_alpha_var.get()))),
                 )
             except Exception as exc:
-                messagebox.showerror(tr("msg.error"), f"Farben konnten nicht erkannt werden:\n{exc}")
+                messagebox.showerror(tr("msg.error"), tr("msg.detect_colors_error", error=exc))
                 return
             self.clear_basic_rows()
             for i, item in enumerate(detected):
                 self.basic_rows.append(BasicWorkflowRow(self, self.basic_rows_container, i, item))
-            self.status_var.set(f"{len(detected)} Farbbereiche erkannt. Ziel-RGB kann direkt in der Tabelle angepasst werden.")
+            self.status_var.set(tr("status.detected_color_regions", count=len(detected)))
             self.update_step1_preview()
         finally:
             if show_busy:
@@ -2562,19 +2585,19 @@ class WorkflowApp(tk.Tk):
 
     def update_manual_status(self) -> None:
         try:
-            self.manual_status_label.configure(text=f"Selektierte Zeile: #{self.selected_manual_row_var.get() + 1} | Klick ins Original übernimmt die Farbe.")
+            self.manual_status_label.configure(text=tr("status.manual_row_selected", row=self.selected_manual_row_var.get() + 1))
         except Exception:
             pass
 
     def on_pick_color(self, rgb: RGB, x: int, y: int) -> None:
         if self.step1_notebook.index(self.step1_notebook.select()) != 1:
-            self.status_var.set(f"Pixel-Farbe bei x={x}, y={y}: {_rgb_to_text(rgb)}")
+            self.status_var.set(tr("status.pixel_color_at", x=x, y=y, rgb=_rgb_to_text(rgb)))
             return
         if not self.manual_rows:
             self.add_manual_row()
         index = max(0, min(self.selected_manual_row_var.get(), len(self.manual_rows) - 1))
         self.manual_rows[index].set_source_rgb(rgb)
-        self.status_var.set(f"Farbe {_rgb_to_text(rgb)} in Zeile #{index + 1} übernommen.")
+        self.status_var.set(tr("status.color_copied_to_row", rgb=_rgb_to_text(rgb), row=index + 1))
 
     def collect_basic_mappings(self) -> List[Any]:
         mappings = []
@@ -2585,7 +2608,7 @@ class WorkflowApp(tk.Tk):
                 if mapping:
                     mappings.append(mapping)
             except Exception as exc:
-                self.status_var.set(f"Ungültige Basis-Farbe: {exc}")
+                self.status_var.set(tr("status.invalid_base_color", error=exc))
         return mappings
 
     def collect_manual_mappings(self) -> List[Any]:
@@ -2596,7 +2619,7 @@ class WorkflowApp(tk.Tk):
                 if mapping:
                     mappings.append(mapping)
             except Exception as exc:
-                self.status_var.set(f"Ungültige manuelle Farbe: {exc}")
+                self.status_var.set(tr("status.invalid_manual_color", error=exc))
         return mappings
 
     def update_step1_preview(self) -> None:
@@ -2615,7 +2638,7 @@ class WorkflowApp(tk.Tk):
                 mappings = self.collect_basic_mappings()
                 self.edited_image = recolor.RecolorApp.apply_mappings(base, mappings) if mappings else base.copy()
         except Exception as exc:
-            self.status_var.set(f"Vorschaufehler: {exc}")
+            self.status_var.set(tr("status.preview_error", error=exc))
             return
         reset = self.step1_edited_canvas.image is None or self.step1_edited_canvas.image.size != self.edited_image.size
         self.step1_edited_canvas.set_image(self.edited_image, reset_view=reset)
@@ -2640,9 +2663,9 @@ class WorkflowApp(tk.Tk):
             )
             self.edited_image = self.special_result_image.copy()
             self.step1_edited_canvas.set_image(self.edited_image, reset_view=False)
-            self.status_var.set("Logo-Maske erzeugt. Diese Maske kann direkt in Schritt 2 vektorisiert werden.")
+            self.status_var.set(tr("status.logo_mask_created"))
         except Exception as exc:
-            messagebox.showerror(tr("msg.error"), f"Logo-Maske konnte nicht erzeugt werden:\n{exc}")
+            messagebox.showerror(tr("msg.error"), tr("msg.logo_mask_error", error=exc))
 
     def clear_logo_mask(self) -> None:
         self.special_result_image = None
@@ -2656,12 +2679,12 @@ class WorkflowApp(tk.Tk):
         initial = "workflow_zwischenbild.png"
         if self.current_path:
             initial = f"{self.current_path.stem}_workflow_zwischenbild.png"
-        path = filedialog.asksaveasfilename(title="Zwischen-PNG speichern", defaultextension=".png", initialfile=initial, filetypes=[("PNG", "*.png")])
+        path = filedialog.asksaveasfilename(title=tr("msg.export_intermediate_title"), defaultextension=".png", initialfile=initial, filetypes=[("PNG", "*.png")])
         if not path:
             return
         try:
             self.edited_image.save(path, format="PNG")
-            self.status_var.set(f"Zwischen-PNG gespeichert: {path}")
+            self.status_var.set(tr("status.intermediate_saved", path=path))
         except Exception as exc:
             messagebox.showerror(tr("msg.export_error"), str(exc))
 
@@ -2703,11 +2726,7 @@ class WorkflowApp(tk.Tk):
                 self.output_path_var.set(str(self.current_path.with_suffix(".dxf")))
             else:
                 self.output_path_var.set("vektor_export.dxf")
-        self.status_var.set(
-            "Bearbeitetes Bild ist für Schritt 2 bereit. Farb-/Layer-Regeln wurden aus dem Zwischen-PNG übernommen."
-            if transferred else
-            "Bearbeitetes Bild ist für Schritt 2 bereit. Farb-/Layer-Regeln wurden automatisch vorgeschlagen."
-        )
+        self.status_var.set(tr("status.vector_source_ready_transferred") if transferred else tr("status.vector_source_ready_autofill"))
         if show_message:
             messagebox.showinfo(tr("msg.accepted_title"), tr("msg.accepted"))
         return True
@@ -2896,7 +2915,7 @@ class WorkflowApp(tk.Tk):
             fg=muted,
             justify="left",
             wraplength=520,
-        ).pack(anchor="w", pady=(12, 10))
+        ).pack(anchor="w", pady=(12, 6))
         buttons = tk.Frame(body, bg=bg)
         buttons.pack(fill="x", pady=(4, 0))
         def done(value: str | None) -> None:
@@ -3074,7 +3093,7 @@ class WorkflowApp(tk.Tk):
         if bw_profile_key and profile_name == bw_profile_key:
             self._apply_bw_detail_preset()
         self.sync_global_tolerance_from_rows()
-        self.status_var.set(f"Profil geladen: {profile_name}")
+        self.status_var.set(tr("status.profile_loaded", profile=profile_name))
 
     def apply_profile_and_preview(self) -> None:
         self.load_vector_profile(self.profile_var.get())
@@ -3146,7 +3165,7 @@ class WorkflowApp(tk.Tk):
             if not self.output_path_var.get():
                 self.output_path_var.set(str(Path(path).with_suffix(".dxf")))
             self.autofill_vector_rows_from_image()
-            self.status_var.set(f"PNG geladen: {Path(path).name}")
+            self.status_var.set(tr("status.png_loaded", name=Path(path).name))
         except Exception as exc:
             messagebox.showerror(tr("msg.load_error"), str(exc))
 
@@ -3217,6 +3236,36 @@ class WorkflowApp(tk.Tk):
         text = self.hole_scale_var.get().strip()
         return min(1.5, max(0.5, float(text.replace(",", ".")))) if text else 1.0
 
+    def get_bridge_count(self) -> int:
+        text = self.bridge_count_var.get().strip()
+        if not text:
+            return 2
+        return max(1, min(8, int(round(float(text.replace(",", "."))))))
+
+    def get_bridge_width_px(self) -> float:
+        widths: List[float] = []
+        mm_text = self.bridge_width_mm_var.get().strip()
+        percent_text = self.bridge_width_percent_var.get().strip()
+        try:
+            mm = max(0.0, float(mm_text.replace(",", "."))) if mm_text else 0.0
+        except Exception:
+            mm = 0.0
+        try:
+            percent = max(0.0, float(percent_text.replace(",", "."))) if percent_text else 0.0
+        except Exception:
+            percent = 0.0
+
+        pixel_to_mm = max(0.0001, self.get_pixel_to_mm())
+        if mm > 0:
+            widths.append(mm / pixel_to_mm)
+        if percent > 0 and self.vector_image_rgb is not None:
+            h, w = self.vector_image_rgb.shape[:2]
+            widths.append(min(w, h) * percent / 100.0)
+
+        if not widths:
+            return 0.0
+        return min(1000.0, max(0.1, max(widths)))
+
     def apply_smart_smoothing_if_enabled(self, contours: List[Any]) -> List[Any]:
         if not self.smart_smoothing_var.get():
             return contours
@@ -3231,6 +3280,17 @@ class WorkflowApp(tk.Tk):
         return vector.scale_hole_contours(
             contours,
             hole_scale=self.get_hole_scale_factor(),
+        )
+
+    def apply_bridge_tabs_if_enabled(self, contours: List[Any]) -> List[Any]:
+        if not self.bridge_tabs_var.get() or self.vector_image_rgb is None:
+            return contours
+        h, w = self.vector_image_rgb.shape[:2]
+        return vector.apply_bridge_tabs(
+            contours,
+            bridge_width_px=self.get_bridge_width_px(),
+            bridge_count=self.get_bridge_count(),
+            image_size=(w, h),
         )
 
     def get_centerline_merge_px(self) -> float:
@@ -3351,15 +3411,15 @@ class WorkflowApp(tk.Tk):
             return
         self.step2_live_after_id = None
         try:
-            self.set_progress(5, "Vektor-Regeln werden gelesen...")
+            self.set_progress(5, tr("progress.read_vector_rules"))
             self.selected_contour_index = None
             self.selected_contour_indices.clear()
-            self.selected_contour_text_var.set("Kein Pfad ausgewählt")
+            self.selected_contour_text_var.set(tr("status.no_path_selected"))
             rules = self.get_vector_rules()
             self.last_rules = rules
             pixel_to_mm = self.get_pixel_to_mm()
             centerline_mode = self.vector_mode_var.get() == "centerline"
-            self.set_progress(10, "Konturen werden erkannt...")
+            self.set_progress(10, tr("progress.detecting_contours"))
             contours = vector.detect_all_contours(
                 self.vector_image_rgb,
                 rules,
@@ -3373,10 +3433,10 @@ class WorkflowApp(tk.Tk):
                 preprocess_edge_smoothing=self.get_preprocess_edge_smoothing(),
                 preprocess_noise_area=self.get_preprocess_noise_area(),
                 internal_scale=self.get_internal_scale(),
-                progress_callback=lambda fraction: self.set_progress(10 + fraction * 65, "Konturen werden erkannt...")
+                progress_callback=lambda fraction: self.set_progress(10 + fraction * 65, tr("progress.detecting_contours"))
             )
             before = len(contours)
-            self.set_progress(80, "Kleine Objekte werden gefiltert...")
+            self.set_progress(80, tr("progress.filter_small_objects"))
             h, w = self.vector_image_rgb.shape[:2]
             self.detected_contours = vector.filter_small_contours(
                 contours,
@@ -3389,6 +3449,7 @@ class WorkflowApp(tk.Tk):
             self.detected_contours = self.apply_manual_smoothing_if_enabled(self.detected_contours)
             self.detected_contours = self.apply_smart_smoothing_if_enabled(self.detected_contours)
             self.detected_contours = self.apply_hole_scaling(self.detected_contours)
+            self.detected_contours = self.apply_bridge_tabs_if_enabled(self.detected_contours)
             self.render_vector_preview()
             exported = sum(1 for c in self.detected_contours if c.rule.export)
             points = sum(len(c.points) for c in self.detected_contours if c.rule.export)
@@ -3404,7 +3465,7 @@ class WorkflowApp(tk.Tk):
                 final_status += f" | {diagnostic_status}"
             self.set_progress(100, final_status)
         except Exception as exc:
-            self.set_progress(0, "Fehler bei Erkennung")
+            self.set_progress(0, tr("progress.detect_error"))
             if live:
                 self.status_var.set(f"{tr('msg.recognize_error_title')}: {exc}")
             else:
@@ -3426,6 +3487,11 @@ class WorkflowApp(tk.Tk):
             self.draw_selected_contour_overlay(preview)
             self.step2_vector_canvas.set_image(preview, reset_view=reset)
             return
+        if mode == "cut_risk":
+            preview = self.build_cut_risk_preview_image()
+            self.draw_selected_contour_overlay(preview)
+            self.step2_vector_canvas.set_image(preview, reset_view=reset)
+            return
 
         h, w = self.vector_image_rgb.shape[:2]
         self.step2_vector_canvas.set_image(Image.new("RGB", (w, h), (255, 255, 255)), reset_view=reset)
@@ -3439,7 +3505,7 @@ class WorkflowApp(tk.Tk):
             self.selected_contour_indices = valid_indices
             self.selected_contour_index = next(iter(valid_indices), None)
             if not valid_indices:
-                self.selected_contour_text_var.set("Kein Pfad ausgewählt")
+                self.selected_contour_text_var.set(tr("status.no_path_selected"))
         return valid_indices
 
     @staticmethod
@@ -3522,7 +3588,7 @@ class WorkflowApp(tk.Tk):
             self.selected_contour_indices = valid_indices
             self.selected_contour_index = next(iter(valid_indices), None)
             if not valid_indices:
-                self.selected_contour_text_var.set("Kein Pfad ausgewählt")
+                self.selected_contour_text_var.set(tr("status.no_path_selected"))
                 return
 
         if not valid_indices:
@@ -3675,15 +3741,80 @@ class WorkflowApp(tk.Tk):
             return preview_hr.resize((w, h), Image.Resampling.LANCZOS)
         return preview_hr
 
+    def build_cut_risk_preview_image(self) -> Image.Image:
+        """
+        Vorschau fuer Schneid-/Fallteile.
+
+        Rot markiert Innenloecher, die beim Durchschneiden als Ausschnitte
+        herausfallen koennen. Orange markiert kleine geschlossene Einzelinseln.
+        Die Ansicht nutzt die bereits erkannten Vektorpfade und passt damit zum
+        aktuellen Exportzustand.
+        """
+        if self.vector_image_rgb is None:
+            return Image.new("RGB", (1, 1), (255, 255, 255))
+
+        h, w = self.vector_image_rgb.shape[:2]
+        aa = max(1, int(getattr(self, "vector_preview_supersample", 1)))
+        preview_hr = Image.new("RGB", (w * aa, h * aa), (248, 250, 252))
+        draw = ImageDraw.Draw(preview_hr)
+
+        exported = [
+            item for item in self.detected_contours
+            if getattr(item.rule, "export", True) and len(getattr(item, "points", []) or []) >= 2
+        ]
+        if not exported:
+            return preview_hr.resize((w, h), Image.Resampling.LANCZOS) if aa > 1 else preview_hr
+
+        areas = [max(0.0, float(getattr(item, "area", 0.0) or 0.0)) for item in exported]
+        max_area = max(areas) if areas else 0.0
+        image_area = max(1.0, float(w * h))
+        small_island_limit = max(
+            12.0,
+            min(image_area * 0.015, max_area * 0.18 if max_area > 0 else image_area * 0.015),
+        )
+
+        for item in exported:
+            pts = [(float(x) * aa, float(y) * aa) for x, y in item.points]
+            if len(pts) < 2:
+                continue
+
+            closed = bool(getattr(item, "closed", False))
+            is_hole = bool(getattr(item, "is_hole", False))
+            area = max(0.0, float(getattr(item, "area", 0.0) or 0.0))
+            is_small_island = closed and not is_hole and area <= small_island_limit
+
+            if is_hole:
+                fill = (255, 218, 218)
+                stroke = (220, 38, 38)
+                width = max(2, int(round(3 * aa)))
+            elif is_small_island:
+                fill = (255, 237, 213)
+                stroke = (234, 88, 12)
+                width = max(2, int(round(3 * aa)))
+            else:
+                fill = (226, 232, 240)
+                stroke = (30, 41, 59)
+                width = max(1, int(round(2 * aa)))
+
+            if closed and len(pts) >= 3:
+                draw.polygon(pts, fill=fill)
+                draw.line(pts + [pts[0]], fill=stroke, width=width, joint="curve")
+            else:
+                draw.line(pts, fill=stroke, width=width, joint="curve")
+
+        if aa > 1:
+            return preview_hr.resize((w, h), Image.Resampling.LANCZOS)
+        return preview_hr
+
     def update_vector_selection_mode_ui(self) -> None:
         """Zeigt optisch, ob Klicks in der Vektorvorschau auswählen oder nur verschieben."""
         try:
             if self.vector_selection_mode_var.get():
                 self.step2_vector_canvas.canvas.configure(cursor="crosshair")
-                self.status_var.set("Auswahl-Modus aktiv: Klick in die Vektor-Vorschau wählt einen Pfad. STRG fügt hinzu, ALT entfernt direkt.")
+                self.status_var.set(tr("status.selection_mode_on"))
             else:
                 self.step2_vector_canvas.canvas.configure(cursor="")
-                self.status_var.set("Auswahl-Modus aus: Vorschau kann normal verschoben werden.")
+                self.status_var.set(tr("status.selection_mode_off"))
         except Exception:
             pass
 
@@ -3827,7 +3958,7 @@ class WorkflowApp(tk.Tk):
         if point is None:
             return None
         if not self.detected_contours:
-            self.selected_contour_text_var.set("Noch keine Konturen erkannt")
+            self.selected_contour_text_var.set(tr("status.no_contours_detected"))
             return None
 
         x, y = point
@@ -3864,7 +3995,7 @@ class WorkflowApp(tk.Tk):
     def select_contour_at_canvas_position(self, canvas_x: int, canvas_y: int, add_to_selection: bool = False) -> None:
         selected_index = self.find_contour_index_at_canvas_position(canvas_x, canvas_y)
         if selected_index is None:
-            self.selected_contour_text_var.set("Kein Pfad getroffen")
+            self.selected_contour_text_var.set(tr("status.no_path_hit"))
             self.render_vector_preview()
             return
 
@@ -3880,13 +4011,13 @@ class WorkflowApp(tk.Tk):
             self.selected_contour_index = selected_index
 
         self.update_selected_contour_text()
-        self.status_var.set("Pfad-Auswahl geändert. Entf oder Button entfernt die ausgewählten Pfade.")
+        self.status_var.set(tr("status.path_selection_changed"))
         self.render_vector_preview()
 
     def remove_contour_at_canvas_position(self, canvas_x: int, canvas_y: int) -> None:
         index = self.find_contour_index_at_canvas_position(canvas_x, canvas_y)
         if index is None:
-            self.selected_contour_text_var.set("Kein Pfad getroffen")
+            self.selected_contour_text_var.set(tr("status.no_path_hit"))
             self.render_vector_preview()
             return
         self.selected_contour_indices = {index}
@@ -3896,29 +4027,29 @@ class WorkflowApp(tk.Tk):
     def update_selected_contour_text(self) -> None:
         count = len(self.selected_contour_indices)
         if count <= 0:
-            self.selected_contour_text_var.set("Kein Pfad ausgewählt")
+            self.selected_contour_text_var.set(tr("status.no_path_selected"))
             return
         if count == 1:
             selected_index = next(iter(self.selected_contour_indices))
             if not (0 <= selected_index < len(self.detected_contours)):
                 self.selected_contour_indices.clear()
                 self.selected_contour_index = None
-                self.selected_contour_text_var.set("Kein Pfad ausgewählt")
+                self.selected_contour_text_var.set(tr("status.no_path_selected"))
                 return
             contour = self.detected_contours[selected_index]
             points = len(getattr(contour, "points", []))
             area = float(getattr(contour, "area", 0.0))
             layer = getattr(contour.rule, "layer", getattr(contour.rule, "name", "Layer"))
             self.selected_contour_text_var.set(
-                f"Ausgewählt: Pfad #{selected_index + 1} | Layer {layer} | Punkte {points} | Fläche ca. {area:.0f}px²"
+                tr("status.path_selected_details", index=selected_index + 1, layer=layer, points=points, area=area)
             )
             return
-        self.selected_contour_text_var.set(f"{count} Pfade ausgewählt | Entf oder Button entfernt alle ausgewählten Pfade")
+        self.selected_contour_text_var.set(tr("status.paths_selected_count", count=count))
 
     def clear_selected_contour(self) -> None:
         self.selected_contour_index = None
         self.selected_contour_indices.clear()
-        self.selected_contour_text_var.set("Kein Pfad ausgewählt")
+        self.selected_contour_text_var.set(tr("status.no_path_selected"))
         self.render_vector_preview()
 
     def remove_selected_contour(self) -> None:
@@ -3927,7 +4058,7 @@ class WorkflowApp(tk.Tk):
             indices = [self.selected_contour_index]
         indices = [idx for idx in indices if 0 <= idx < len(self.detected_contours)]
         if not indices:
-            self.status_var.set("Kein Pfad ausgewählt.")
+            self.status_var.set(tr("status.no_path_selected"))
             return
 
         removed_info = []
@@ -3941,12 +4072,12 @@ class WorkflowApp(tk.Tk):
         self.selected_contour_indices.clear()
         if len(removed_info) == 1:
             idx, layer, points = removed_info[0]
-            self.selected_contour_text_var.set(f"Entfernt: Pfad #{idx + 1} | Layer {layer} | Punkte {points}")
+            self.selected_contour_text_var.set(tr("status.path_removed_details", index=idx + 1, layer=layer, points=points))
         else:
-            self.selected_contour_text_var.set(f"Entfernt: {len(removed_info)} Pfade")
+            self.selected_contour_text_var.set(tr("status.paths_removed_count", count=len(removed_info)))
         exported = sum(1 for c in self.detected_contours if c.rule.export)
         total_points = sum(len(c.points) for c in self.detected_contours if c.rule.export)
-        self.status_var.set(f"Pfad entfernt. Verbleibend: {len(self.detected_contours)} | Export aktiv: {exported} | Punkte: {total_points}")
+        self.status_var.set(tr("status.path_removed", remaining=len(self.detected_contours), exported=exported, points=total_points))
         # Bildreferenz kurz leeren, damit Tkinter garantiert neu rendert.
         try:
             self.step2_vector_canvas.tk_image = None
@@ -3960,7 +4091,7 @@ class WorkflowApp(tk.Tk):
             return
         original_epsilons = [row.epsilon_var.get() for row in self.vector_rows]
         try:
-            self.set_progress(0, "Auto-Werte werden vorbereitet...")
+            self.set_progress(0, tr("progress.auto_prepare"))
             pixel_to_mm = self.get_pixel_to_mm()
             centerline_mode = self.vector_mode_var.get() == "centerline"
             if centerline_mode:
@@ -3985,7 +4116,7 @@ class WorkflowApp(tk.Tk):
             best_contours: List[Any] = []
             h, w = self.vector_image_rgb.shape[:2]
             for idx, cand in enumerate(candidates):
-                self.set_progress(idx / max(1, len(candidates)) * 90, f"Auto-Werte: Test {idx + 1}/{len(candidates)}...")
+                self.set_progress(idx / max(1, len(candidates)) * 90, tr("progress.auto_test", index=idx + 1, total=len(candidates)))
                 for row in self.vector_rows:
                     row.epsilon_var.set(str(cand["epsilon"]).replace(".", ","))
                     try:
@@ -4012,6 +4143,7 @@ class WorkflowApp(tk.Tk):
                 contours = self.apply_manual_smoothing_if_enabled(contours, iterations=int(cand["smooth"]))
                 contours = self.apply_smart_smoothing_if_enabled(contours)
                 contours = self.apply_hole_scaling(contours)
+                contours = self.apply_bridge_tabs_if_enabled(contours)
                 score = vector.score_vector_result(self.vector_image_rgb, rules, contours, centerline_mode)
                 if score > best_score:
                     best_score = score
@@ -4026,11 +4158,11 @@ class WorkflowApp(tk.Tk):
             self.detected_contours = best_contours
             self.render_vector_preview()
             points = sum(len(c.points) for c in self.detected_contours if c.rule.export)
-            self.set_progress(100, f"Auto-Werte gesetzt | Score: {best_score:.3f} | Punkte: {points}")
+            self.set_progress(100, tr("progress.auto_applied", score=best_score, points=points))
         except Exception as exc:
             for row, eps in zip(self.vector_rows, original_epsilons):
                 row.epsilon_var.set(eps)
-            self.set_progress(0, "Fehler bei Auto-Werten")
+            self.set_progress(0, tr("progress.auto_error"))
             messagebox.showerror(tr("msg.auto_values_error_title"), str(exc))
 
     def export_vector_file(self) -> None:
@@ -4051,7 +4183,7 @@ class WorkflowApp(tk.Tk):
             suffix = Path(out).suffix.lower()
             pixel_to_mm = self.get_pixel_to_mm()
             h, w = self.vector_image_rgb.shape[:2]
-            self.set_progress(60, "Datei wird geschrieben...")
+            self.set_progress(60, tr("progress.writing_file"))
             if suffix == ".svg":
                 vector.export_svg(
                     out,
@@ -4079,7 +4211,7 @@ class WorkflowApp(tk.Tk):
             else:
                 raise ValueError("Output muss .dxf oder .svg sein.")
             cad_cleanup = "ein / eindeutige Einzellinien" if self.unique_cad_lines_var.get() else "aus / originale Polylines"
-            self.set_progress(100, f"Export fertig: {out} | DXF {self.get_selected_dxf_version()} | Doppellinien-Cleanup: {cad_cleanup}")
+            self.set_progress(100, tr("progress.export_done", out=out, dxf_version=self.get_selected_dxf_version(), cad_cleanup=cad_cleanup))
             messagebox.showinfo(
                 tr("msg.export_done_title"),
                 f"Datei wurde gespeichert:\n{out}\n\nKompatibilität: {self.dxf_compatibility_display_var.get()}\nDXF-Format: {self.dxf_version_var.get()}\nDXF-Version intern: {self.get_selected_dxf_version()}\nDoppelte Linien entfernen: {cad_cleanup}"

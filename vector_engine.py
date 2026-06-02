@@ -31,7 +31,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -856,6 +856,172 @@ def scale_hole_contours(
             )
         )
     return scaled
+
+
+def _closed_polyline_perimeter(points: List[Tuple[float, float]]) -> float:
+    if len(points) < 2:
+        return 0.0
+    total = 0.0
+    for index, point in enumerate(points):
+        next_point = points[(index + 1) % len(points)]
+        total += point_distance(point, next_point)
+    return total
+
+
+def _point_at_closed_distance(
+    points: List[Tuple[float, float]],
+    target_distance: float,
+    perimeter: float,
+) -> Tuple[float, float]:
+    if not points:
+        return (0.0, 0.0)
+    if perimeter <= 0:
+        return points[0]
+
+    target = target_distance % perimeter
+    walked = 0.0
+    for index, point in enumerate(points):
+        next_point = points[(index + 1) % len(points)]
+        segment_length = point_distance(point, next_point)
+        if segment_length <= 1e-9:
+            continue
+        if walked + segment_length >= target:
+            ratio = (target - walked) / segment_length
+            return (
+                point[0] + (next_point[0] - point[0]) * ratio,
+                point[1] + (next_point[1] - point[1]) * ratio,
+            )
+        walked += segment_length
+    return points[-1]
+
+
+def _distance_in_gap(distance_value: float, gaps: List[Tuple[float, float]], perimeter: float) -> bool:
+    if perimeter <= 0:
+        return False
+    value = distance_value % perimeter
+    for start, end in gaps:
+        start %= perimeter
+        end %= perimeter
+        if start <= end:
+            if start <= value <= end:
+                return True
+        elif value >= start or value <= end:
+            return True
+    return False
+
+
+def _split_closed_contour_with_gaps(
+    points: List[Tuple[float, float]],
+    bridge_width_px: float,
+    bridge_count: int,
+) -> List[List[Tuple[float, float]]]:
+    if len(points) < 4:
+        return [points]
+
+    clean_points = [(float(x), float(y)) for x, y in points]
+    perimeter = _closed_polyline_perimeter(clean_points)
+    if perimeter <= 0:
+        return [points]
+
+    gap_width = max(0.5, min(float(bridge_width_px), perimeter * 0.20))
+    max_count = max(1, int(perimeter / max(gap_width * 2.5, 1.0)))
+    count = max(1, min(int(bridge_count), max_count))
+
+    gaps: List[Tuple[float, float]] = []
+    for index in range(count):
+        center = ((index + 0.5) / count) * perimeter
+        gaps.append((center - gap_width / 2.0, center + gap_width / 2.0))
+
+    sample_step = max(0.5, min(2.0, gap_width / 4.0))
+    sample_count = max(len(clean_points), int(math.ceil(perimeter / sample_step)))
+    sample_count = max(12, min(sample_count, 12000))
+    samples = [
+        _point_at_closed_distance(clean_points, perimeter * index / sample_count, perimeter)
+        for index in range(sample_count)
+    ]
+    kept = [
+        not _distance_in_gap(perimeter * index / sample_count, gaps, perimeter)
+        for index in range(sample_count)
+    ]
+
+    if all(kept) or not any(kept):
+        return [points]
+
+    start_index = 0
+    for index, is_kept in enumerate(kept):
+        if is_kept and not kept[index - 1]:
+            start_index = index
+            break
+
+    segments: List[List[Tuple[float, float]]] = []
+    current: List[Tuple[float, float]] = []
+    for offset in range(sample_count):
+        index = (start_index + offset) % sample_count
+        if kept[index]:
+            current.append(samples[index])
+        elif current:
+            if len(current) >= 2:
+                segments.append(current)
+            current = []
+    if len(current) >= 2:
+        segments.append(current)
+
+    return segments or [points]
+
+
+def apply_bridge_tabs(
+    contours: List[DetectedContour],
+    bridge_width_px: float,
+    bridge_count: int = 2,
+    image_size: Optional[Tuple[int, int]] = None,
+    include_holes: bool = True,
+    include_small_islands: bool = True,
+) -> List[DetectedContour]:
+    """Öffnet Fallteil-Risikokonturen mit kurzen Stegen.
+
+    Die Funktion erzeugt keine neuen Formen, sondern setzt echte Lücken in
+    geschlossene Konturen. Dadurch sind Vorschau, SVG und DXF deckungsgleich.
+    """
+    width = max(0.0, float(bridge_width_px))
+    if width <= 0 or bridge_count <= 0:
+        return contours
+
+    closed_areas = [abs(float(c.area)) for c in contours if c.closed and not c.is_hole and c.rule.export]
+    max_area = max(closed_areas) if closed_areas else 0.0
+    if image_size:
+        image_area = max(1.0, float(image_size[0] * image_size[1]))
+    else:
+        image_area = max(max_area, 1.0)
+    small_limit = max(16.0, min(image_area * 0.015, max_area * 0.20 if max_area else image_area * 0.015))
+
+    result: List[DetectedContour] = []
+    for contour in contours:
+        if not contour.rule.export or not contour.closed or len(contour.points) < 4:
+            result.append(contour)
+            continue
+
+        is_risk = (include_holes and contour.is_hole) or (
+            include_small_islands and not contour.is_hole and abs(float(contour.area)) <= small_limit
+        )
+        if not is_risk:
+            result.append(contour)
+            continue
+
+        segments = _split_closed_contour_with_gaps(contour.points, width, bridge_count)
+        if len(segments) == 1 and segments[0] == contour.points:
+            result.append(contour)
+            continue
+        for segment in segments:
+            result.append(
+                DetectedContour(
+                    rule=contour.rule,
+                    points=segment,
+                    area=0.0,
+                    closed=False,
+                    is_hole=False,
+                )
+            )
+    return result
 
 
 def is_closed_path(points: List[Tuple[float, float]]) -> bool:
