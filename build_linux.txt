@@ -1,5 +1,8 @@
 pyinstaller --onefile --windowed --clean \
   --name Vektorrazor \
-  --add-data "assets/vektorrazor.ico:assets" \
+  --hidden-import=PIL._tkinter_finder \
+  --hidden-import=PIL.ImageTk \
+  --collect-submodules=PIL \
   --add-data "assets/vektorrazor_icon.png:assets" \
+  --add-data "assets/vektorrazor.ico:assets" \
   main.py
