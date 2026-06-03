@@ -48,7 +48,13 @@ Dieses Release verbessert den gesamten Workflow, die Bedienbarkeit und die Vorsc
 - Deutsche Umlaute korrigiert
 - Linux-Canvas-Probleme behoben
 - Allgemeine Bugfixes und Stabilitätsverbesserungen
+- Ankerpunkt-Modus
+- - Aktiviert oder deaktiviert die Bearbeitung über Ankerpunkte
+- Vektor-Art wählen: Logo, Geometrie, Organisches Bild, Gemischt
+-  - beeinflusst Geometire Genauigkeit
 - Mac OS Build
+
+
 ### Hinweise
 
 Vektorrazor ist weiterhin ein Prototyp mit Fokus auf CAD-orientierte Vektorvorbereitung und Export-Workflows.
@@ -77,6 +83,9 @@ This release improves the overall workflow, usability and preview quality of Vek
 - Fixed German umlauts
 - Fixed Linux canvas issues
 - General bugfixes and stability improvements
+- Enable/disable anchor point mode
+- Select vector type: Logo, Geometry, Organic image, or Mixed
+- - affects geometry accuracy
 - Mac OS Build
 
 ### Notes
