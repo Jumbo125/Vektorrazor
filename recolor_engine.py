@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import math
 import re
+import time
 import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +51,7 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 from typing import Callable, Optional, Tuple
 
 import numpy as np
+import cv2
 from PIL import Image, ImageColor, ImageFilter, ImageTk
 
 RGB = Tuple[int, int, int]
@@ -149,6 +151,23 @@ def mask_for_rgb(base_rgb: np.ndarray, source_rgb: RGB, tolerance: int) -> np.nd
     return (diff[:, :, 0] <= tol) & (diff[:, :, 1] <= tol) & (diff[:, :, 2] <= tol)
 
 
+def _assign_contrast_targets(found: list[tuple[RGB, int]], total_valid: int) -> list["DetectedColor"]:
+    detected: list[DetectedColor] = []
+    for index, (rep, count) in enumerate(found):
+        palette_name, target = CONTRAST_PALETTE[index % len(CONTRAST_PALETTE)]
+        percent = (count / max(1, total_valid)) * 100.0
+        detected.append(
+            DetectedColor(
+                source_rgb=rep,
+                target_rgb=target,
+                pixels=count,
+                percent=percent,
+                palette_name=palette_name,
+            )
+        )
+    return detected
+
+
 def apply_image_preparation(
     image: Image.Image,
     brightness: int = 0,
@@ -227,6 +246,7 @@ class ZoomImageCanvas(ttk.Frame):
         self._left_press: Optional[Tuple[int, int, float, float]] = None
         self._left_dragged = False
         self._max_display_pixels = 30_000_000
+        self._render_after_id: Optional[str] = None
 
         ttk.Label(self, text=title, font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=4, pady=(0, 4))
         self.canvas = tk.Canvas(self, bg="#303030", highlightthickness=1, highlightbackground="#808080")
@@ -254,6 +274,7 @@ class ZoomImageCanvas(ttk.Frame):
 
     def set_image(self, image: Optional[Image.Image], reset_view: bool = True) -> None:
         self.image = image
+        self._cancel_scheduled_render()
         if image is None:
             self.canvas.delete("all")
             self.tk_image = None
@@ -300,7 +321,19 @@ class ZoomImageCanvas(ttk.Frame):
         except Exception:
             pass
 
-    def set_zoom(self, zoom: float) -> None:
+    def _cancel_scheduled_render(self) -> None:
+        if self._render_after_id:
+            try:
+                self.after_cancel(self._render_after_id)
+            except Exception:
+                pass
+            self._render_after_id = None
+
+    def schedule_render(self, delay_ms: int = 20) -> None:
+        self._cancel_scheduled_render()
+        self._render_after_id = self.after(max(1, int(delay_ms)), self.render)
+
+    def set_zoom(self, zoom: float, defer_render: bool = True) -> None:
         if self.image is None:
             return
         old_zoom = max(0.0001, float(self.zoom))
@@ -315,7 +348,10 @@ class ZoomImageCanvas(ttk.Frame):
         self.zoom = new_zoom
         self.offset_x = cx - img_x * new_zoom
         self.offset_y = cy - img_y * new_zoom
-        self.render()
+        if defer_render:
+            self.schedule_render()
+        else:
+            self.render()
         self._notify_zoom_changed()
 
     def _safe_zoom(self, requested_zoom: float) -> float:
@@ -329,6 +365,7 @@ class ZoomImageCanvas(ttk.Frame):
         return max(0.02, requested_zoom)
 
     def render(self) -> None:
+        self._render_after_id = None
         self.canvas.delete("all")
         cw = max(1, self.canvas.winfo_width())
         ch = max(1, self.canvas.winfo_height())
@@ -369,7 +406,7 @@ class ZoomImageCanvas(ttk.Frame):
 
         # kleiner Zoom-Hinweis unten links
         self.canvas.create_rectangle(4, ch - 26, 96, ch - 4, fill="#111111", outline="")
-        self.canvas.create_text(50, ch - 15, text=f"Zoom {self.zoom:.2f}x", fill="white")
+        self.canvas.create_text(50, ch - 15, text=f"Zoom {self.zoom * 100:.0f}%", fill="white")
 
     def _on_mousewheel(self, event: tk.Event) -> None:
         if self.image is None:
@@ -392,7 +429,7 @@ class ZoomImageCanvas(ttk.Frame):
         self.zoom = new_zoom
         self.offset_x = event.x - img_x * new_zoom
         self.offset_y = event.y - img_y * new_zoom
-        self.render()
+        self.schedule_render()
         self._notify_zoom_changed()
 
     def _pick_pixel_at_canvas_pos(self, canvas_x: int, canvas_y: int) -> None:
@@ -515,6 +552,8 @@ class MappingValues:
     source_rgb: RGB
     target_rgb: RGB
     tolerance: int
+    fill_noise: int = 0
+    fill_solid: bool = False
 
 
 @dataclass
@@ -524,6 +563,23 @@ class DetectedColor:
     pixels: int
     percent: float
     palette_name: str
+
+
+@dataclass
+class PhotoScanAnalysis:
+    score: int
+    background_noise: float
+    color_complexity: float
+    small_specks: int
+    edge_fray: float
+    target_mismatch: float = 0.0
+
+
+@dataclass
+class PhotoScanCleanupResult:
+    image: Image.Image
+    detected: list[DetectedColor]
+    analysis: PhotoScanAnalysis
 
 
 # -----------------------------------------------------------------------------
@@ -1117,13 +1173,22 @@ class RecolorApp(tk.Tk):
             base_image = self.get_prepared_image(force=True)
             if base_image is None:
                 return
-            detected = self.detect_colors_by_threshold(
+            detected = self.detect_motif_colors_by_threshold(
                 base_image,
                 threshold=threshold,
                 min_area=min_area,
                 max_colors=max_colors,
                 alpha_min=alpha_min,
+                noise_suppression=int(self.basic_noise_var.get()) if hasattr(self, "basic_noise_var") else 45,
             )
+            if len(detected) < 2:
+                detected = self.detect_colors_by_threshold(
+                    base_image,
+                    threshold=threshold,
+                    min_area=min_area,
+                    max_colors=max_colors,
+                    alpha_min=alpha_min,
+                )
         except Exception as exc:
             messagebox.showerror("Fehler", f"Farben konnten nicht erkannt werden:\n{exc}")
             return
@@ -1232,20 +1297,730 @@ class RecolorApp(tk.Tk):
         found.sort(key=lambda item: item[1], reverse=True)
         found = found[:max_colors]
 
+        return _assign_contrast_targets(found, total_valid)
+
+    @staticmethod
+    def detect_motif_colors_by_threshold(
+        image: Image.Image,
+        threshold: int,
+        min_area: int,
+        max_colors: int,
+        alpha_min: int,
+        noise_suppression: int = 45,
+    ) -> list[DetectedColor]:
+        """
+        Erkennt wenige Hauptfarben fuer Logos/Etiketten mit Papierstruktur.
+
+        Anders als die einfache RGB-Haeufigkeit behandelt diese Methode eine
+        helle, wenig kontrastreiche Hintergrundebene als Hintergrundrauschen.
+        Uebrig bleiben zusammengefasste Motivfarben mit ausreichendem Abstand
+        zum Hintergrund. Das ist keine Motiv-Sonderlogik, sondern eine
+        generelle Vordergrund-/Hintergrundtrennung.
+        """
+        rgba = np.array(image.convert("RGBA"), dtype=np.uint8)
+        rgb_full = rgba[:, :, :3]
+        alpha = rgba[:, :, 3]
+        valid_mask = alpha >= alpha_min
+        total_valid = int(valid_mask.sum())
+        if total_valid <= 0:
+            return []
+        noise_suppression = max(0, min(100, int(noise_suppression)))
+
+        rgb_float = rgb_full.astype(np.float32)
+        valid_pixels = rgb_float[valid_mask]
+        gray = 0.299 * rgb_float[:, :, 0] + 0.587 * rgb_float[:, :, 1] + 0.114 * rgb_float[:, :, 2]
+        rgb_norm = np.clip(rgb_float / 255.0, 0.0, 1.0)
+        sat = np.max(rgb_norm, axis=2) - np.min(rgb_norm, axis=2)
+        gray_values = gray[valid_mask]
+        sat_values = sat[valid_mask]
+
+        p50 = float(np.percentile(gray_values, 50))
+        p75 = float(np.percentile(gray_values, 75))
+        p92 = float(np.percentile(gray_values, 92))
+        background_luma_floor = max(p50, p75 - 10.0)
+
+        h, w = valid_mask.shape
+        border_width = max(2, int(round(min(h, w) * 0.035)))
+        border_mask = np.zeros_like(valid_mask, dtype=bool)
+        border_mask[:border_width, :] = True
+        border_mask[-border_width:, :] = True
+        border_mask[:, :border_width] = True
+        border_mask[:, -border_width:] = True
+        border_candidates = valid_mask & border_mask & (gray >= background_luma_floor)
+        if int(border_candidates.sum()) >= max(32, total_valid * 0.002):
+            bg_pixels = rgb_float[border_candidates]
+        else:
+            bg_pixels = valid_pixels[gray_values >= background_luma_floor]
+            if bg_pixels.size == 0:
+                bg_pixels = valid_pixels
+        background_rgb = np.median(bg_pixels, axis=0)
+        background_sat = float(np.median(sat[valid_mask & (gray >= background_luma_floor)])) if np.any(valid_mask & (gray >= background_luma_floor)) else float(np.median(sat_values))
+
+        color_distance = np.linalg.norm(rgb_float - background_rgb.reshape(1, 1, 3), axis=2)
+        luma_distance = np.abs(gray - float(np.median(gray_values[gray_values >= background_luma_floor])) if np.any(gray_values >= background_luma_floor) else gray - p92)
+        noise_bias = noise_suppression / 100.0
+        foreground_distance = max(18.0, float(threshold) * (1.55 + noise_bias * 0.35))
+        dark_ink_limit = min(p50 - 8.0, p92 - 34.0)
+        colored_ink = (sat >= max(0.055, background_sat + 0.035 + noise_bias * 0.025)) & (color_distance >= max(12.0, float(threshold) * (0.85 + noise_bias * 0.20)))
+        dark_ink = gray <= dark_ink_limit
+        contrast_ink = (color_distance >= foreground_distance) | (luma_distance >= max(18.0, float(threshold) * 1.4))
+        motif_mask = valid_mask & (colored_ink | dark_ink | contrast_ink)
+
+        # Hintergrundtextur besteht oft aus winzigen Farbabweichungen. Eine
+        # kleine Medianfilterung entfernt Einzelpixel, laesst Linien/Flaechen aber stehen.
+        median_size = 3 if noise_suppression < 65 else 5
+        mask_img = Image.fromarray((motif_mask.astype(np.uint8) * 255), "L").filter(ImageFilter.MedianFilter(size=median_size))
+        motif_mask = np.array(mask_img, dtype=np.uint8) >= 128
+        motif_count = int(motif_mask.sum())
+        if motif_count < min_area:
+            return []
+
+        found: list[tuple[RGB, int]] = []
+        motif_gray = gray[motif_mask]
+        dark_cluster_limit = min(
+            110.0,
+            max(42.0, float(np.percentile(motif_gray, 30)) if motif_gray.size else 70.0),
+        )
+        dark_group_mask = motif_mask & (gray <= dark_cluster_limit)
+        dark_group_count = int(dark_group_mask.sum())
+        if dark_group_count >= min_area:
+            dark_pixels = rgb_float[dark_group_mask]
+            dark_rep = tuple(int(max(0, min(255, round(v)))) for v in np.median(dark_pixels, axis=0))
+            found.append((dark_rep, dark_group_count))
+
+        color_cluster_mask = motif_mask & ~dark_group_mask
+        pixels = rgb_full[color_cluster_mask]
+        if pixels.shape[0] <= 0:
+            found.sort(key=lambda item: item[1], reverse=True)
+            found = found[: max(1, int(max_colors))]
+            return _assign_contrast_targets(found, total_valid)
+
+        max_sample_pixels = 1_000_000
+        if pixels.shape[0] > max_sample_pixels:
+            step = int(math.ceil(pixels.shape[0] / max_sample_pixels))
+            sample = pixels[::step]
+        else:
+            sample = pixels
+
+        unique, counts = np.unique(sample, axis=0, return_counts=True)
+        order = np.argsort(counts)[::-1]
+        reps: list[np.ndarray] = []
+        rep_counts: list[int] = []
+        merge_distance = max(26.0, float(threshold) * 2.4)
+        max_reps_to_build = max(1, int(max_colors)) * 5
+        for idx in order:
+            color_arr = unique[idx].astype(np.float32)
+            count = int(counts[idx])
+            best_index = -1
+            best_distance = 10**9
+            for rep_index, rep in enumerate(reps):
+                dist = float(np.linalg.norm(color_arr - rep))
+                if dist < best_distance:
+                    best_distance = dist
+                    best_index = rep_index
+            if best_index >= 0 and best_distance <= merge_distance:
+                current_count = rep_counts[best_index]
+                new_count = current_count + count
+                reps[best_index] = ((reps[best_index] * current_count) + (color_arr * count)) / max(1, new_count)
+                rep_counts[best_index] = new_count
+            else:
+                reps.append(color_arr)
+                rep_counts.append(count)
+                if len(reps) >= max_reps_to_build:
+                    break
+
+        rgb_float_full = rgb_full.astype(np.float32)
+        for rep in reps:
+            dist = np.linalg.norm(rgb_float_full - rep.reshape(1, 1, 3), axis=2)
+            mask = (dist <= merge_distance) & color_cluster_mask
+            real_count = int(mask.sum())
+            if real_count >= min_area:
+                rep_rgb = tuple(int(max(0, min(255, round(v)))) for v in rep)
+                found.append((rep_rgb, real_count))
+
+        found.sort(key=lambda item: item[1], reverse=True)
+        found = found[: max(1, int(max_colors))]
+        return _assign_contrast_targets(found, total_valid)
+
+    @staticmethod
+    def analyze_photo_scan_logo_problem(image: Image.Image, target_colors: Optional[list[RGB]] = None) -> PhotoScanAnalysis:
+        image = RecolorApp._limited_work_image(image, max_edge=1800)[0]
+        rgba = np.array(image.convert("RGBA"), dtype=np.uint8)
+        rgb = rgba[:, :, :3]
+        alpha = rgba[:, :, 3] > 0
+        if not np.any(alpha):
+            return PhotoScanAnalysis(0, 0.0, 0.0, 0, 0.0, 0.0)
+
+        rgb_float = rgb.astype(np.float32)
+        gray = (0.299 * rgb_float[:, :, 0] + 0.587 * rgb_float[:, :, 1] + 0.114 * rgb_float[:, :, 2]).astype(np.uint8)
+        valid_gray = gray[alpha]
+        bright_limit = max(170, int(np.percentile(valid_gray, 72)))
+        bright_bg = alpha & (gray >= bright_limit)
+        if int(bright_bg.sum()) < max(64, int(alpha.sum() * 0.08)):
+            bright_bg = alpha & (gray >= int(np.percentile(valid_gray, 60)))
+
+        blur = cv2.GaussianBlur(gray, (0, 0), 1.2)
+        residual = np.abs(gray.astype(np.int16) - blur.astype(np.int16)).astype(np.float32)
+        background_noise = float(np.mean(residual[bright_bg])) if np.any(bright_bg) else 0.0
+
+        sample = rgb[alpha]
+        if sample.shape[0] > 250_000:
+            step = int(math.ceil(sample.shape[0] / 250_000))
+            sample = sample[::step]
+        quant = (sample.astype(np.uint16) // 16).astype(np.uint8)
+        unique_bins = int(np.unique(quant, axis=0).shape[0])
+        color_complexity = float(unique_bins)
+
+        edges = cv2.Canny(gray, 45, 130)
+        edge_mask = (edges > 0) & alpha
+        labels_count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(edge_mask.astype(np.uint8), connectivity=8)
+        small_specks = 0
+        for label_id in range(1, labels_count):
+            area = int(stats[label_id, cv2.CC_STAT_AREA])
+            if 1 <= area <= 8:
+                small_specks += 1
+        edge_area = max(1, int(edge_mask.sum()))
+        edge_fray = min(1.0, small_specks / max(25.0, edge_area * 0.030))
+
+        target_mismatch = 0.0
+        if target_colors:
+            targets = np.array(target_colors, dtype=np.float32)
+            if targets.ndim == 2 and targets.shape[0] > 0:
+                diff = sample.astype(np.float32)[:, None, :] - targets[None, :, :]
+                nearest = np.sqrt(np.sum(diff * diff, axis=2)).min(axis=1)
+                target_mismatch = float(np.mean(nearest > 34.0))
+
+        score = 0
+        score += 2 if background_noise >= 8.0 else 1 if background_noise >= 4.0 else 0
+        score += 2 if color_complexity >= 180 else 1 if color_complexity >= 80 else 0
+        score += 2 if small_specks >= 900 else 1 if small_specks >= 250 else 0
+        score += 2 if edge_fray >= 0.75 else 1 if edge_fray >= 0.35 else 0
+        score += 2 if target_mismatch >= 0.30 else 1 if target_mismatch >= 0.12 else 0
+        return PhotoScanAnalysis(
+            score=int(score),
+            background_noise=background_noise,
+            color_complexity=color_complexity,
+            small_specks=int(small_specks),
+            edge_fray=edge_fray,
+            target_mismatch=target_mismatch,
+        )
+
+    @staticmethod
+    def _limited_work_image(image: Image.Image, max_edge: int = 1800) -> tuple[Image.Image, float]:
+        width, height = image.size
+        longest = max(width, height)
+        if longest <= max_edge or longest <= 0:
+            return image, 1.0
+        scale = float(max_edge) / float(longest)
+        new_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+        return image.resize(new_size, Image.Resampling.LANCZOS), scale
+
+    @staticmethod
+    def build_photo_scan_cleanup_image(
+        image: Image.Image,
+        max_colors: int = 3,
+        min_area: int = 10,
+        noise_suppression: int = 70,
+        foreground_distance: int = 30,
+        weak_contrast: int = 0,
+        protect_background: bool = False,
+        object_mask_first: bool = False,
+        despeckle: bool = False,
+        despeckle_min_area: int = 0,
+        protect_thin_lines: bool = True,
+        close_lines: bool = True,
+        fill_small_holes: bool = False,
+        max_work_edge: int = 1500,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        cancel_callback: Optional[Callable[[], bool]] = None,
+    ) -> PhotoScanCleanupResult:
+        step_timeout_s = 20.0
+        total_started = time.perf_counter()
+        step_started = total_started
+        current_step = "start"
+
+        def progress(value: float, key: str) -> None:
+            if progress_callback is not None:
+                progress_callback(float(value), key)
+
+        def check_cancel() -> None:
+            if cancel_callback is not None and cancel_callback():
+                raise InterruptedError("cancelled")
+
+        def begin_step(value: float, key: str, debug_name: str) -> None:
+            nonlocal step_started, current_step
+            now = time.perf_counter()
+            if current_step != "start":
+                print(f"[Vektorrazor FotoScan] {current_step}: {now - step_started:.2f}s", flush=True)
+            current_step = debug_name
+            step_started = now
+            progress(value, key)
+            check_cancel()
+
+        def check_step_timeout(detail: str = "") -> None:
+            check_cancel()
+            elapsed = time.perf_counter() - step_started
+            if elapsed > step_timeout_s:
+                suffix = f" ({detail})" if detail else ""
+                raise TimeoutError(f"Foto-/Scan-Maskenschritt zu langsam: {current_step}{suffix}, {elapsed:.1f}s")
+
+        def remove_isolated_pixels(mask: np.ndarray, min_neighbors: int) -> np.ndarray:
+            if not np.any(mask):
+                return mask
+            kernel = np.ones((3, 3), dtype=np.uint8)
+            neighbors = cv2.filter2D(mask.astype(np.uint8), -1, kernel, borderType=cv2.BORDER_CONSTANT)
+            return mask & (neighbors >= max(1, min(9, int(min_neighbors))))
+
+        def keep_components_by_stats(
+            labels: np.ndarray,
+            stats: np.ndarray,
+            criteria: np.ndarray,
+            label_count: int,
+        ) -> np.ndarray:
+            keep = np.zeros(label_count, dtype=bool)
+            if label_count > 1:
+                keep[1:] = criteria
+            return keep[labels]
+
+        def despeckle_color_mask(mask_u8: np.ndarray, min_island_area: int) -> tuple[np.ndarray, int, int]:
+            if min_island_area <= 0 or not np.any(mask_u8 >= 128):
+                return mask_u8, 0, 0
+            mask = mask_u8 >= 128
+            kernel = np.ones((3, 3), dtype=np.uint8)
+            neighbors = cv2.filter2D(mask.astype(np.uint8), -1, kernel, borderType=cv2.BORDER_CONSTANT)
+            neighbor_min = 2 if min_island_area < 40 else 3 if min_island_area < 140 else 4
+            mask = mask & (neighbors >= neighbor_min)
+            labels_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+            if labels_count <= 1:
+                return np.zeros_like(mask_u8), 0, 0
+            areas = stats[1:, cv2.CC_STAT_AREA].astype(np.int64)
+            widths = stats[1:, cv2.CC_STAT_WIDTH].astype(np.int64)
+            heights = stats[1:, cv2.CC_STAT_HEIGHT].astype(np.int64)
+            spans = np.maximum(widths, heights)
+            mins = np.maximum(1, np.minimum(widths, heights))
+            line_min_area = max(3, min_island_area // 3)
+            line_min_span = max(8, min(h, w) // 180)
+            line_like = protect_thin_lines & (areas >= line_min_area) & (spans >= line_min_span) & (
+                (mins <= max(3, min(h, w) // 180))
+                | ((spans / mins.astype(np.float32)) >= 2.4)
+            )
+            criteria = (areas >= min_island_area) | line_like
+            cleaned = keep_components_by_stats(labels, stats, criteria, labels_count)
+            removed_components = int((~criteria).sum())
+            removed_pixels = int(mask.sum() - cleaned.sum())
+            inverse = ~cleaned
+            inv_count, inv_labels, inv_stats, _inv_centroids = cv2.connectedComponentsWithStats(inverse.astype(np.uint8), connectivity=8)
+            if inv_count > 1:
+                inv_areas = inv_stats[1:, cv2.CC_STAT_AREA].astype(np.int64)
+                touches_border = np.zeros(inv_count, dtype=bool)
+                touches_border[np.unique(inv_labels[0, :])] = True
+                touches_border[np.unique(inv_labels[-1, :])] = True
+                touches_border[np.unique(inv_labels[:, 0])] = True
+                touches_border[np.unique(inv_labels[:, -1])] = True
+                fill_criteria = (~touches_border[1:]) & (inv_areas <= max(1, min_island_area))
+                fill_holes = keep_components_by_stats(inv_labels, inv_stats, fill_criteria, inv_count)
+                cleaned = cleaned | fill_holes
+                removed_pixels += int(fill_holes.sum())
+            return (cleaned.astype(np.uint8) * 255), removed_components, removed_pixels
+
+        original_size = image.size
+        begin_step(8, "progress.prepare_image", "Bild vorbereiten")
+        image, work_scale = RecolorApp._limited_work_image(image, max_edge=max_work_edge)
+        rgba = np.array(image.convert("RGBA"), dtype=np.uint8)
+        rgb = rgba[:, :, :3]
+        alpha = rgba[:, :, 3] > 0
+        h, w = alpha.shape
+        total_valid = int(alpha.sum())
+        max_colors = max(1, min(8, int(max_colors)))
+        min_area = max(1, int(min_area))
+        noise_suppression = max(0, min(100, int(noise_suppression)))
+        foreground_distance = max(5, min(80, int(foreground_distance)))
+        weak_contrast = max(0, min(100, int(weak_contrast)))
+        weak_factor = weak_contrast / 100.0
+        despeckle_min_area = max(0, min(500, int(despeckle_min_area)))
+        if despeckle and despeckle_min_area <= 0:
+            base = (max(1.0, float(min(h, w))) / 650.0) ** 2
+            despeckle_min_area = max(1, min(80, int(round(base * (2.5 + (noise_suppression / 100.0) * 4.5)))))
+        print(
+            "[Vektorrazor FotoScan] "
+            f"Original={original_size[0]}x{original_size[1]}, Arbeit={w}x{h}, "
+            f"Scale={work_scale:.3f}, Ziel-Farben={max_colors}, "
+            f"Entpunkten={despeckle}, Mindestinsel={despeckle_min_area}",
+            flush=True,
+        )
+        analysis = RecolorApp.analyze_photo_scan_logo_problem(image)
+        if total_valid <= 0:
+            out = np.zeros((h, w, 4), dtype=np.uint8)
+            result_image = Image.fromarray(out, "RGBA")
+            if result_image.size != original_size:
+                result_image = result_image.resize(original_size, Image.Resampling.NEAREST)
+            return PhotoScanCleanupResult(result_image, [], analysis)
+
+        rgb_float = rgb.astype(np.float32)
+        begin_step(18, "progress.photo_scan_background", "Hintergrundmaske")
+        gray = (0.299 * rgb_float[:, :, 0] + 0.587 * rgb_float[:, :, 1] + 0.114 * rgb_float[:, :, 2]).astype(np.uint8)
+        hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+        sat = hsv[:, :, 1].astype(np.float32) / 255.0
+        lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+
+        valid_gray = gray[alpha]
+        p50 = float(np.percentile(valid_gray, 50))
+        p80 = float(np.percentile(valid_gray, 80))
+        p92 = float(np.percentile(valid_gray, 92))
+        bright_bg = alpha & (gray >= max(165, int(p80 - 4)))
+        if int(bright_bg.sum()) < max(64, total_valid * 0.04):
+            bright_bg = alpha & (gray >= int(p50))
+        bg_rgb = np.median(rgb_float[bright_bg], axis=0) if np.any(bright_bg) else np.median(rgb_float[alpha], axis=0)
+        bg_lab = cv2.cvtColor(np.uint8([[bg_rgb]]), cv2.COLOR_RGB2LAB).astype(np.float32)[0, 0]
+
+        lab_distance = np.linalg.norm(lab - bg_lab.reshape(1, 1, 3), axis=2)
+        luma_distance = np.abs(gray.astype(np.float32) - p92)
+        noise_factor = noise_suppression / 100.0
+        bg_gray = cv2.GaussianBlur(gray, (0, 0), max(1.0, min(h, w) * 0.010))
+        local_dark = bg_gray.astype(np.float32) - gray.astype(np.float32)
+        lab_blur = cv2.GaussianBlur(lab, (0, 0), 1.2)
+        local_lab_change = np.linalg.norm(lab - lab_blur, axis=2)
+        lab_threshold = max(4.0, float(foreground_distance) * (0.75 + noise_factor * 0.35))
+        background_locked = np.zeros_like(alpha, dtype=bool)
+        if protect_background:
+            border = np.zeros_like(alpha, dtype=bool)
+            border_px = max(3, min(h, w) // 40)
+            border[:border_px, :] = True
+            border[-border_px:, :] = True
+            border[:, :border_px] = True
+            border[:, -border_px:] = True
+            border_bg = alpha & border & (gray >= max(150, int(p80 - 8))) & (sat <= 0.30)
+            if int(border_bg.sum()) < max(64, total_valid * 0.01):
+                border_bg = bright_bg
+            edge_bg_rgb = np.median(rgb_float[border_bg], axis=0) if np.any(border_bg) else bg_rgb
+            edge_bg_lab = cv2.cvtColor(np.uint8([[edge_bg_rgb]]), cv2.COLOR_RGB2LAB).astype(np.float32)[0, 0]
+            edge_lab_distance = np.linalg.norm(lab - edge_bg_lab.reshape(1, 1, 3), axis=2)
+            background_locked = (
+                alpha
+                & (edge_lab_distance < max(3.0, lab_threshold * 0.78))
+                & (gray >= max(135, int(p50 - 4)))
+                & (sat <= 0.42)
+                & (local_lab_change < 4.2)
+            )
+        check_step_timeout("Hintergrund")
+
+        begin_step(30, "progress.photo_scan_main_masks", "Hauptmasken")
+        main_mask = alpha & (
+            (lab_distance >= lab_threshold)
+            | (sat >= (0.10 + noise_factor * 0.04))
+            | (gray.astype(np.float32) <= min(p50 - 8.0, p92 - 38.0))
+            | (luma_distance >= (22.0 + noise_factor * 10.0))
+        )
+        main_mask &= ~background_locked
+        main_mask = remove_isolated_pixels(main_mask, 2 if protect_thin_lines else 3)
+        object_candidate = alpha & ~background_locked
+        if object_mask_first:
+            edges = cv2.Canny(gray, 45, 135) > 0
+            edge_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            edges = cv2.dilate(edges.astype(np.uint8), edge_kernel, iterations=1) >= 128
+            secure_object = main_mask
+            soft_object = object_candidate & (
+                secure_object
+                | edges
+                | (local_lab_change >= 2.4)
+                | (local_dark >= max(3.0, 8.0 - weak_factor * 4.0))
+            )
+            soft_object = remove_isolated_pixels(soft_object, 2 if protect_thin_lines else 3)
+            labels_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(soft_object.astype(np.uint8), connectivity=8)
+            if labels_count > 1:
+                touches_secure = np.bincount(
+                    labels.ravel(),
+                    weights=secure_object.ravel().astype(np.uint8),
+                    minlength=labels_count,
+                ) > 0
+                areas = stats[1:, cv2.CC_STAT_AREA].astype(np.int64)
+                widths = stats[1:, cv2.CC_STAT_WIDTH].astype(np.int64)
+                heights = stats[1:, cv2.CC_STAT_HEIGHT].astype(np.int64)
+                spans = np.maximum(widths, heights)
+                mins = np.maximum(1, np.minimum(widths, heights))
+                line_like = (spans >= max(6, min(h, w) // 220)) & (
+                    (mins <= max(5, min(h, w) // 100))
+                    | ((spans / mins.astype(np.float32)) >= 2.0)
+                )
+                small_detail = (weak_contrast > 0) & (areas <= max(min_area * 8, int(round(total_valid * 0.004)))) & line_like
+                criteria = touches_secure[1:] | small_detail | (areas >= max(min_area * 4, int(round(total_valid * 0.006))))
+                object_candidate = keep_components_by_stats(labels, stats, criteria, labels_count)
+            else:
+                object_candidate = secure_object
+            object_candidate |= main_mask
+            print(
+                "[Vektorrazor FotoScan] "
+                f"Objektmaske Komponenten={labels_count - 1}, Pixel={int(object_candidate.sum())}",
+                flush=True,
+            )
+            check_step_timeout("Objektmaske")
+        print(
+            "[Vektorrazor FotoScan] "
+            f"Hintergrundschutz={protect_background}, Hintergrund gesperrt={int(background_locked.sum())}, "
+            f"Objektmaske={object_mask_first}, Hauptmaske={int(main_mask.sum())}",
+            flush=True,
+        )
+        check_step_timeout("Hauptmaske")
+
+        begin_step(42, "progress.photo_scan_detail_masks", "Detailmasken")
+        weak_line_mask = np.zeros_like(main_mask, dtype=bool)
+        if weak_contrast > 0:
+            weak_lab_threshold = max(2.5, lab_threshold * (0.72 - weak_factor * 0.36))
+            weak_luma_threshold = max(3.0, (18.0 + noise_factor * 6.0) * (1.0 - weak_factor * 0.70))
+            weak_sat_threshold = max(0.018, (0.075 + noise_factor * 0.018) * (1.0 - weak_factor * 0.60))
+            weak_candidate = object_candidate & ~main_mask & (
+                ((lab_distance >= weak_lab_threshold) & ((sat >= weak_sat_threshold) | (local_lab_change >= 1.6 + weak_factor * 2.2)))
+                | (local_dark >= weak_luma_threshold)
+            )
+            weak_candidate &= ~background_locked
+            weak_candidate = remove_isolated_pixels(weak_candidate, 2 if protect_thin_lines else 3)
+            weak_kernel_size = 3 if weak_contrast < 55 else 5
+            weak_kernel_size = max(3, min(5, int(weak_kernel_size)))
+            weak_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (weak_kernel_size, weak_kernel_size))
+            weak_candidate = cv2.morphologyEx((weak_candidate.astype(np.uint8) * 255), cv2.MORPH_CLOSE, weak_kernel, iterations=1) >= 128
+            weak_candidate &= ~background_locked
+            check_step_timeout("Detailkandidaten")
+            labels_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(weak_candidate.astype(np.uint8), connectivity=8)
+            min_span = max(6, int(round(min(h, w) * 0.010)))
+            max_width_for_line = max(4, int(round(min(h, w) * (0.010 + weak_factor * 0.010))))
+            max_line_area = max(min_area * 12, int(round(total_valid * (0.003 + weak_factor * 0.010))))
+            if labels_count > 1:
+                areas = stats[1:, cv2.CC_STAT_AREA].astype(np.int64)
+                widths = stats[1:, cv2.CC_STAT_WIDTH].astype(np.int64)
+                heights = stats[1:, cv2.CC_STAT_HEIGHT].astype(np.int64)
+                spans = np.maximum(widths, heights)
+                mins = np.maximum(1, np.minimum(widths, heights))
+                narrow = mins <= max_width_for_line
+                elongated = (spans >= min_span) & ((spans / mins.astype(np.float32)) >= (2.2 if protect_thin_lines else 3.2))
+                ring_like = (spans >= min_span) & (areas <= max_line_area) & (areas <= (widths * heights) * (0.42 + weak_factor * 0.18))
+                criteria = (
+                    (protect_thin_lines and (areas >= max(1, min_area // 10)) & (narrow | elongated | ring_like))
+                    | ((areas >= max(1, min_area // 4)) & elongated & (areas <= max_line_area))
+                )
+                weak_line_mask = keep_components_by_stats(labels, stats, criteria, labels_count)
+            print(
+                "[Vektorrazor FotoScan] "
+                f"Detailmaske Komponenten={labels_count - 1}, Kernel={weak_kernel_size}x{weak_kernel_size}, "
+                f"behalten={int(weak_line_mask.sum())}",
+                flush=True,
+            )
+            check_step_timeout("Detailkomponenten")
+
+        foreground = (main_mask | weak_line_mask) & object_candidate
+
+        begin_step(52, "progress.photo_scan_cleanup", "Vorreinigung")
+        fg_img = cv2.medianBlur((foreground.astype(np.uint8) * 255), 3)
+        foreground = fg_img >= 128
+        if noise_suppression >= 35:
+            labels_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(foreground.astype(np.uint8), connectivity=8)
+            thin_line_min = max(2, int(round(min(h, w) * 0.006)))
+            if labels_count > 1:
+                areas = stats[1:, cv2.CC_STAT_AREA].astype(np.int64)
+                widths = stats[1:, cv2.CC_STAT_WIDTH].astype(np.int64)
+                heights = stats[1:, cv2.CC_STAT_HEIGHT].astype(np.int64)
+                spans = np.maximum(widths, heights)
+                mins = np.minimum(widths, heights)
+                long_thin = protect_thin_lines & (spans >= thin_line_min) & (mins <= max(4, int(round(min(h, w) * 0.010))))
+                weak_keep = (weak_contrast > 0) & (spans >= max(4, thin_line_min // 2)) & (areas >= max(1, min_area // 6))
+                criteria = (areas >= min_area) | ((areas >= max(2, min_area // 3)) & (spans >= thin_line_min)) | long_thin | weak_keep
+                foreground = keep_components_by_stats(labels, stats, criteria, labels_count)
+            else:
+                foreground = np.zeros_like(foreground)
+            print(
+                "[Vektorrazor FotoScan] "
+                f"Vorreinigung Komponenten={labels_count - 1}, Vordergrund={int(foreground.sum())}",
+                flush=True,
+            )
+            check_step_timeout("Vorreinigung")
+
+        if np.any(weak_line_mask):
+            weak_dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            weak_line_mask = cv2.dilate(weak_line_mask.astype(np.uint8), weak_dilate_kernel, iterations=1) >= 128
+            foreground = foreground | weak_line_mask
+
+        pixels_lab = lab[foreground]
+        if pixels_lab.shape[0] <= 0:
+            out = np.zeros((h, w, 4), dtype=np.uint8)
+            out[:, :, 0:3] = 255
+            out[:, :, 3] = rgba[:, :, 3]
+            result_image = Image.fromarray(out, "RGBA")
+            if result_image.size != original_size:
+                result_image = result_image.resize(original_size, Image.Resampling.NEAREST)
+            return PhotoScanCleanupResult(result_image, [], analysis)
+
+        begin_step(62, "progress.photo_scan_cluster", "Farben clustern")
+        sample = pixels_lab
+        if sample.shape[0] > 180_000:
+            step = int(math.ceil(sample.shape[0] / 180_000))
+            sample = sample[::step]
+        cluster_count = max(1, min(max_colors, int(sample.shape[0])))
+        _compactness, _labels_sample, centers = cv2.kmeans(
+            sample.astype(np.float32),
+            cluster_count,
+            None,
+            (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 35, 0.8),
+            3,
+            cv2.KMEANS_PP_CENTERS,
+        )
+        centers = centers.astype(np.float32)
+        all_dist = np.linalg.norm(lab[:, :, None, :] - centers.reshape(1, 1, cluster_count, 3), axis=3)
+        assigned_cluster = np.argmin(all_dist, axis=2)
+        print(
+            "[Vektorrazor FotoScan] "
+            f"Cluster={cluster_count}, Sample={sample.shape[0]}, Distanzmatrix={all_dist.shape}",
+            flush=True,
+        )
+        check_step_timeout("Cluster")
+
+        masks: list[tuple[int, np.ndarray, RGB]] = []
+        begin_step(72, "progress.photo_scan_hysteresis", "Hysterese")
+        line_close_radius = 1 if weak_contrast < 60 else 2
+        line_close_radius = max(1, min(3, int(line_close_radius)))
+        line_close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (line_close_radius * 2 + 1, line_close_radius * 2 + 1))
+        hole_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        print(
+            "[Vektorrazor FotoScan] "
+            f"Kernel Linien={line_close_kernel.shape[1]}x{line_close_kernel.shape[0]}, "
+            f"Loecher={hole_kernel.shape[1]}x{hole_kernel.shape[0]}",
+            flush=True,
+        )
+        for cluster_index in range(cluster_count):
+            check_step_timeout(f"Cluster {cluster_index + 1}/{cluster_count}")
+            dist_to_center = all_dist[:, :, cluster_index]
+            secure_distance = float(np.percentile(dist_to_center[foreground & (assigned_cluster == cluster_index)], 68)) if np.any(foreground & (assigned_cluster == cluster_index)) else 0.0
+            secure_limit = max(4.0, secure_distance)
+            weak_limit = secure_limit * (1.45 + weak_factor * 0.85)
+            secure_mask = foreground & (assigned_cluster == cluster_index) & (dist_to_center <= secure_limit)
+            candidate_mask = foreground & object_candidate & (dist_to_center <= weak_limit)
+            candidate_mask &= ~background_locked
+            candidate_mask = remove_isolated_pixels(candidate_mask, 2 if protect_thin_lines else 3)
+            if not np.any(secure_mask):
+                continue
+            labels_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(candidate_mask.astype(np.uint8), connectivity=8)
+            if labels_count <= 1:
+                continue
+            touches_secure = np.bincount(
+                labels.ravel(),
+                weights=secure_mask.ravel().astype(np.uint8),
+                minlength=labels_count,
+            ) > 0
+            areas = stats[1:, cv2.CC_STAT_AREA].astype(np.int64)
+            widths = stats[1:, cv2.CC_STAT_WIDTH].astype(np.int64)
+            heights = stats[1:, cv2.CC_STAT_HEIGHT].astype(np.int64)
+            spans = np.maximum(widths, heights)
+            mins = np.maximum(1, np.minimum(widths, heights))
+            compact_large = (areas >= max(min_area * 8, int(round(total_valid * 0.010)))) & (areas > (widths * heights) * 0.55)
+            line_like = (spans >= max(8, min(h, w) // 180)) & (
+                (mins <= max(6, min(h, w) // 90))
+                | ((spans / mins.astype(np.float32)) >= 2.0)
+            )
+            criteria = touches_secure[1:] & (
+                compact_large | line_like | (areas <= max(min_area * 6, int(round(total_valid * 0.004))))
+            )
+            mask = secure_mask | keep_components_by_stats(labels, stats, criteria, labels_count)
+            print(
+                "[Vektorrazor FotoScan] "
+                f"Maske {cluster_index + 1}/{cluster_count}: Komponenten={labels_count - 1}, "
+                f"beruehren_sicher={int(touches_secure.sum()) - int(touches_secure[0])}, "
+                f"Pixel={int(mask.sum())}",
+                flush=True,
+            )
+
+            mask_u8 = mask.astype(np.uint8) * 255
+            if despeckle and despeckle_min_area > 0:
+                mask_u8, removed_components, removed_pixels = despeckle_color_mask(mask_u8, despeckle_min_area)
+                print(
+                    "[Vektorrazor FotoScan] "
+                    f"Entpunkten Maske {cluster_index + 1}/{cluster_count}: "
+                    f"entfernte Komponenten={removed_components}, korrigierte Pixel={removed_pixels}",
+                    flush=True,
+                )
+            if close_lines:
+                line_candidates = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, line_close_kernel, iterations=1)
+                add = (line_candidates >= 128) & ~(mask_u8 >= 128)
+                if np.any(add):
+                    labels_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(add.astype(np.uint8), connectivity=8)
+                    if labels_count > 1:
+                        areas = stats[1:, cv2.CC_STAT_AREA].astype(np.int64)
+                        widths = stats[1:, cv2.CC_STAT_WIDTH].astype(np.int64)
+                        heights = stats[1:, cv2.CC_STAT_HEIGHT].astype(np.int64)
+                        criteria = (areas <= max(24, min_area * 2)) | (np.minimum(widths, heights) <= max(4, line_close_radius * 3))
+                        safe_add = keep_components_by_stats(labels, stats, criteria, labels_count)
+                    else:
+                        safe_add = np.zeros_like(add)
+                    mask_u8[safe_add] = 255
+            if fill_small_holes:
+                filled = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, hole_kernel, iterations=1)
+                holes = (filled >= 128) & ~(mask_u8 >= 128)
+                if np.any(holes):
+                    labels_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(holes.astype(np.uint8), connectivity=8)
+                    if labels_count > 1:
+                        areas = stats[1:, cv2.CC_STAT_AREA].astype(np.int64)
+                        widths = stats[1:, cv2.CC_STAT_WIDTH].astype(np.int64)
+                        heights = stats[1:, cv2.CC_STAT_HEIGHT].astype(np.int64)
+                        criteria = (areas <= max(16, min_area * 3)) & (np.maximum(widths, heights) <= max(10, min(h, w) // 80))
+                        safe_holes = keep_components_by_stats(labels, stats, criteria, labels_count)
+                    else:
+                        safe_holes = np.zeros_like(holes)
+                    mask_u8[safe_holes] = 255
+            if noise_suppression >= 55 and not protect_thin_lines:
+                open_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+                mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, open_kernel, iterations=1)
+            labels_count, labels, stats, _centroids = cv2.connectedComponentsWithStats((mask_u8 >= 128).astype(np.uint8), connectivity=8)
+            if labels_count > 1:
+                areas = stats[1:, cv2.CC_STAT_AREA].astype(np.int64)
+                widths = stats[1:, cv2.CC_STAT_WIDTH].astype(np.int64)
+                heights = stats[1:, cv2.CC_STAT_HEIGHT].astype(np.int64)
+                spans = np.maximum(widths, heights)
+                mins = np.minimum(widths, heights)
+                long_thin = protect_thin_lines & (spans >= max(8, min(h, w) // 160)) & (mins <= max(5, min(h, w) // 90))
+                weak_keep = (weak_contrast > 0) & (spans >= max(6, min(h, w) // 220)) & (areas >= max(1, min_area // 8))
+                criteria = (areas >= min_area) | ((areas >= max(2, min_area // 3)) & (spans >= max(8, min(h, w) // 120))) | long_thin | weak_keep
+                clean = keep_components_by_stats(labels, stats, criteria, labels_count)
+            else:
+                clean = np.zeros_like(mask, dtype=bool)
+            area = int(clean.sum())
+            if area < min_area and not (protect_thin_lines and area >= max(1, min_area // 8)):
+                continue
+            median_rgb = tuple(int(max(0, min(255, round(v)))) for v in np.median(rgb_float[clean], axis=0))
+            masks.append((area, clean, median_rgb))
+
+        masks.sort(key=lambda item: item[0], reverse=True)
+        begin_step(88, "progress.render_preview", "Vorschau")
+        out = np.zeros((h, w, 4), dtype=np.uint8)
+        out[:, :, 0:3] = 255
+        out[:, :, 3] = rgba[:, :, 3]
         detected: list[DetectedColor] = []
-        for index, (rep, count) in enumerate(found):
-            palette_name, target = CONTRAST_PALETTE[index % len(CONTRAST_PALETTE)]
-            percent = (count / total_valid) * 100.0
+        occupied = np.zeros((h, w), dtype=bool)
+        for index, (area, mask, source_rgb) in enumerate(masks[:max_colors]):
+            draw_mask = mask & ~occupied
+            area = int(draw_mask.sum())
+            if area <= 0:
+                continue
+            palette_name, target_rgb = CONTRAST_PALETTE[index % len(CONTRAST_PALETTE)]
+            out[draw_mask, 0:3] = np.array(target_rgb, dtype=np.uint8)
+            occupied[draw_mask] = True
             detected.append(
                 DetectedColor(
-                    source_rgb=rep,
-                    target_rgb=target,
-                    pixels=count,
-                    percent=percent,
+                    source_rgb=source_rgb,
+                    target_rgb=target_rgb,
+                    pixels=area,
+                    percent=(area / max(1, total_valid)) * 100.0,
                     palette_name=palette_name,
                 )
             )
-        return detected
+
+        result_image = Image.fromarray(out, "RGBA")
+        if result_image.size != original_size:
+            result_image = result_image.resize(original_size, Image.Resampling.NEAREST)
+            if work_scale > 0:
+                inv_area = 1.0 / max(1e-9, work_scale * work_scale)
+                for item in detected:
+                    item.pixels = int(round(float(item.pixels) * inv_area))
+                    item.percent = (item.pixels / max(1, int(np.count_nonzero(np.array(result_image.convert("RGBA"))[:, :, 3] > 0)))) * 100.0
+        progress(100, "progress.render_preview")
+        print(f"[Vektorrazor FotoScan] Gesamt: {time.perf_counter() - total_started:.2f}s", flush=True)
+        return PhotoScanCleanupResult(result_image, detected, analysis)
 
     # ------------------------------------------------------------------ Spezial: Logo-Maske ueber lokalen Kontrast
     def create_logo_mask_preview(self) -> None:
@@ -1302,6 +2077,8 @@ class RecolorApp(tk.Tk):
         foreground: RGB,
         background: RGB,
         clean: bool = True,
+        preserve_color_accents: bool = False,
+        accent: RGB = (128, 64, 0),
     ) -> Image.Image:
         rgba = np.array(image.convert("RGBA"), dtype=np.uint8)
         rgb = rgba[:, :, :3].astype(np.float32)
@@ -1333,6 +2110,40 @@ class RecolorApp(tk.Tk):
         out[:, :, 0:3] = np.array(background, dtype=np.uint8)
         out[:, :, 3] = 255
         out[mask, 0:3] = np.array(foreground, dtype=np.uint8)
+
+        if preserve_color_accents:
+            valid = alpha > 0
+            rgb_norm = np.clip(rgb / 255.0, 0.0, 1.0)
+            sat = np.max(rgb_norm, axis=2) - np.min(rgb_norm, axis=2)
+            bg_candidates = valid & (gray >= np.percentile(gray[valid], 55) if np.any(valid) else True)
+            if np.any(bg_candidates):
+                bg_rgb = np.median(rgb[bg_candidates], axis=0)
+            else:
+                bg_rgb = np.array(background, dtype=np.float32)
+            color_distance = np.linalg.norm(rgb - bg_rgb.reshape(1, 1, 3), axis=2)
+            accent_mask = (
+                valid
+                & ~mask
+                & (sat >= 0.075)
+                & (color_distance >= 22.0)
+                & (gray <= min(245, int(np.percentile(gray[valid], 96)) if np.any(valid) else 245))
+            )
+            if np.any(accent_mask):
+                labels_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+                    accent_mask.astype(np.uint8),
+                    connectivity=8,
+                )
+                keep = np.zeros_like(accent_mask, dtype=bool)
+                min_area = max(5, int(round(float(valid.sum()) * 0.00001)))
+                for label_id in range(1, labels_count):
+                    area = int(stats[label_id, cv2.CC_STAT_AREA])
+                    width = int(stats[label_id, cv2.CC_STAT_WIDTH])
+                    height = int(stats[label_id, cv2.CC_STAT_HEIGHT])
+                    span = max(width / max(1, w), height / max(1, h))
+                    if area >= min_area or (area >= 3 and span >= 0.025):
+                        keep[labels == label_id] = True
+                if np.any(keep):
+                    out[keep, 0:3] = np.array(accent, dtype=np.uint8)
         return Image.fromarray(out, "RGBA")
 
     # ------------------------------------------------------------------ Erweiterter Modus
@@ -1461,11 +2272,62 @@ class RecolorApp(tk.Tk):
         result = base.copy()
         base_rgb = base[:, :, :3].astype(np.int16)
 
-        for mapping in mappings:
-            dst = np.array(mapping.target_rgb, dtype=np.uint8)
-            mask = mask_for_rgb(base_rgb, mapping.source_rgb, mapping.tolerance)
-            result[mask, 0:3] = dst
-            # Alpha bleibt unveraendert, damit transparente PNGs sauber bleiben.
+        active_mappings = [mapping for mapping in mappings if getattr(mapping, "enabled", True)]
+        if not active_mappings:
+            return Image.fromarray(result, "RGBA")
+
+        best_distance = np.full(base_rgb.shape[:2], np.inf, dtype=np.float32)
+        best_target = np.zeros_like(result[:, :, 0:3])
+        assigned = np.zeros(base_rgb.shape[:2], dtype=bool)
+        assigned_labels = np.full(base_rgb.shape[:2], -1, dtype=np.int16)
+        label_targets = [np.array(mapping.target_rgb, dtype=np.uint8) for mapping in active_mappings]
+
+        for label_index, mapping in enumerate(active_mappings):
+            src = np.array(mapping.source_rgb, dtype=np.int16)
+            diff = np.abs(base_rgb - src)
+            tol = max(0, min(255, int(mapping.tolerance)))
+            mask = (diff[:, :, 0] <= tol) & (diff[:, :, 1] <= tol) & (diff[:, :, 2] <= tol)
+            if not np.any(mask):
+                continue
+            distance = np.sqrt(np.sum(diff.astype(np.float32) * diff.astype(np.float32), axis=2))
+            update = mask & (distance < best_distance)
+            if not np.any(update):
+                continue
+            best_distance[update] = distance[update]
+            target = label_targets[label_index]
+            best_target[update] = target
+            assigned_labels[update] = label_index
+            assigned[update] = True
+
+        result[assigned, 0:3] = best_target[assigned]
+
+        max_fill_noise = max(0, min(100, max(int(getattr(mapping, "fill_noise", 0) or 0) for mapping in active_mappings)))
+        fill_solid = any(bool(getattr(mapping, "fill_solid", False)) for mapping in active_mappings)
+        if max_fill_noise > 0 and np.any(assigned):
+            if fill_solid:
+                radius = 2 if max_fill_noise < 45 else 4 if max_fill_noise < 75 else 6
+            else:
+                radius = 1 if max_fill_noise < 45 else 2 if max_fill_noise < 75 else 3
+            filter_size = radius * 2 + 1
+            fill_mask_total = np.zeros_like(assigned)
+            for label_index, target in enumerate(label_targets):
+                label_mask = assigned_labels == label_index
+                if not np.any(label_mask):
+                    continue
+                mask_img = Image.fromarray((label_mask.astype(np.uint8) * 255), "L")
+                closed = mask_img.filter(ImageFilter.MaxFilter(size=filter_size)).filter(ImageFilter.MinFilter(size=filter_size))
+                fill_candidates = (np.array(closed, dtype=np.uint8) >= 128) & ~label_mask
+                if fill_solid:
+                    fill_mask = fill_candidates & ~fill_mask_total
+                else:
+                    fill_mask = fill_candidates & ~assigned & ~fill_mask_total
+                if not np.any(fill_mask):
+                    continue
+                result[fill_mask, 0:3] = target
+                assigned_labels[fill_mask] = label_index
+                assigned[fill_mask] = True
+                fill_mask_total[fill_mask] = True
+        # Alpha bleibt unveraendert, damit transparente PNGs sauber bleiben.
 
         return Image.fromarray(result, "RGBA")
 

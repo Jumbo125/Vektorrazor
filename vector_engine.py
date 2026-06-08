@@ -62,6 +62,7 @@ class DetectedContour:
     area: float
     closed: bool = True
     is_hole: bool = False
+    raw_points: Optional[List[Tuple[float, float]]] = None
 
 
 PROFILE_ROWS: Dict[str, List[Tuple[str, str, str, str, bool, str, str]]] = {
@@ -318,14 +319,24 @@ def merge_nearby_mask_lines(mask: np.ndarray, merge_distance_px: float) -> np.nd
     return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
 
-def zhang_suen_thinning(mask: np.ndarray) -> np.ndarray:
+def zhang_suen_thinning(mask: np.ndarray, max_iterations: int = 180) -> np.ndarray:
+    try:
+        ximgproc = getattr(cv2, "ximgproc", None)
+        thinning = getattr(ximgproc, "thinning", None) if ximgproc is not None else None
+        if thinning is not None:
+            return thinning((mask > 0).astype(np.uint8) * 255)
+    except Exception:
+        pass
+
     image = (mask > 0).astype(np.uint8)
     if image.size == 0:
         return mask
 
     changed = True
-    while changed:
+    iterations = 0
+    while changed and iterations < max(1, int(max_iterations)):
         changed = False
+        iterations += 1
         for step in (0, 1):
             padded = np.pad(image, 1, mode="constant")
             p2 = padded[:-2, 1:-1]
@@ -491,7 +502,83 @@ def remove_loose_anchor_points(points: List[Tuple[float, float]]) -> List[Tuple[
 
         cleaned = filtered
 
+    changed = True
+    while changed and len(cleaned) >= 3:
+        changed = False
+        filtered = []
+        for index, point in enumerate(cleaned):
+            prev_point = cleaned[index - 1]
+            next_point = cleaned[(index + 1) % len(cleaned)]
+            span = point_distance(prev_point, next_point)
+            if span > 1.0:
+                numerator = abs(
+                    (next_point[0] - prev_point[0]) * (prev_point[1] - point[1])
+                    - (prev_point[0] - point[0]) * (next_point[1] - prev_point[1])
+                )
+                distance = numerator / max(1e-9, span)
+                if distance <= 0.25:
+                    changed = True
+                    continue
+            filtered.append(point)
+        cleaned = filtered
+
     return cleaned
+
+
+def remove_neighbor_anchor_points(
+    points: List[Tuple[float, float]],
+    min_distance_px: float,
+    closed: bool = True,
+) -> List[Tuple[float, float]]:
+    threshold = max(0.0, float(min_distance_px))
+    if threshold <= 0.0 or len(points) < 2:
+        return points
+
+    if closed:
+        if len(points) < 3:
+            return points
+        cleaned: List[Tuple[float, float]] = []
+        for point in points:
+            if not cleaned or point_distance(cleaned[-1], point) >= threshold:
+                cleaned.append(point)
+        if len(cleaned) > 1 and point_distance(cleaned[0], cleaned[-1]) < threshold:
+            cleaned.pop()
+        return cleaned if len(cleaned) >= 3 else points
+
+    cleaned = [points[0]]
+    for point in points[1:-1]:
+        if point_distance(cleaned[-1], point) >= threshold:
+            cleaned.append(point)
+    if len(points) > 1:
+        if point_distance(cleaned[-1], points[-1]) >= threshold:
+            cleaned.append(points[-1])
+        else:
+            cleaned[-1] = points[-1]
+    return cleaned if len(cleaned) >= 2 else points
+
+
+def remove_neighbor_anchor_points_from_contours(
+    contours: List[DetectedContour],
+    min_distance_px: float,
+) -> List[DetectedContour]:
+    threshold = max(0.0, float(min_distance_px))
+    if threshold <= 0.0:
+        return contours
+
+    cleaned_contours: List[DetectedContour] = []
+    for contour in contours:
+        cleaned_points = remove_neighbor_anchor_points(contour.points, threshold, closed=contour.closed)
+        cleaned_contours.append(
+            DetectedContour(
+                rule=contour.rule,
+                points=cleaned_points,
+                area=contour.area,
+                closed=contour.closed,
+                is_hole=contour.is_hole,
+                raw_points=contour.raw_points,
+            )
+        )
+    return cleaned_contours
 
 
 def smooth_closed_points(
@@ -568,9 +655,107 @@ def smooth_contours(
                 area=contour.area,
                 closed=contour.closed,
                 is_hole=contour.is_hole,
+                raw_points=contour.raw_points,
             )
         )
     return result
+
+
+def _ellipse_points(
+    center: Tuple[float, float],
+    axes: Tuple[float, float],
+    angle_deg: float,
+    count: int,
+) -> List[Tuple[float, float]]:
+    cx, cy = center
+    rx = max(0.1, float(axes[0]) * 0.5)
+    ry = max(0.1, float(axes[1]) * 0.5)
+    angle = math.radians(float(angle_deg))
+    ca = math.cos(angle)
+    sa = math.sin(angle)
+    points: List[Tuple[float, float]] = []
+    for index in range(max(12, int(count))):
+        t = (2.0 * math.pi * index) / max(12, int(count))
+        x = math.cos(t) * rx
+        y = math.sin(t) * ry
+        points.append((cx + x * ca - y * sa, cy + x * sa + y * ca))
+    return points
+
+
+def _ellipse_fit_error(points: List[Tuple[float, float]], ellipse: Any) -> float:
+    (cx, cy), (major, minor), angle_deg = ellipse
+    rx = max(0.1, float(major) * 0.5)
+    ry = max(0.1, float(minor) * 0.5)
+    angle = math.radians(float(angle_deg))
+    ca = math.cos(-angle)
+    sa = math.sin(-angle)
+    errors: List[float] = []
+    for x, y in points:
+        dx = float(x) - float(cx)
+        dy = float(y) - float(cy)
+        lx = dx * ca - dy * sa
+        ly = dx * sa + dy * ca
+        radius = math.sqrt((lx / rx) ** 2 + (ly / ry) ** 2)
+        errors.append(abs(radius - 1.0))
+    if not errors:
+        return 999.0
+    return float(sum(errors) / len(errors))
+
+
+def regularize_circular_contours(
+    contours: List[DetectedContour],
+    min_area: float = 80.0,
+    circularity_threshold: float = 0.70,
+    max_fit_error: float = 0.075,
+) -> List[DetectedContour]:
+    """Replace clean round/elliptic closed contours with stable ellipse samples."""
+    regularized: List[DetectedContour] = []
+    for contour in contours:
+        points = contour.points
+        if not contour.closed or len(points) < 12 or abs(float(contour.area)) < float(min_area):
+            regularized.append(contour)
+            continue
+
+        pts = np.array(points, dtype=np.float32).reshape(-1, 1, 2)
+        perimeter = float(cv2.arcLength(pts, True))
+        area = abs(float(cv2.contourArea(pts)))
+        if perimeter <= 1e-6 or area <= 1e-6:
+            regularized.append(contour)
+            continue
+
+        circularity = (4.0 * math.pi * area) / (perimeter * perimeter)
+        x, y, w, h = cv2.boundingRect(pts.astype(np.int32))
+        aspect = float(w) / max(1.0, float(h))
+        if circularity < circularity_threshold or aspect < 0.45 or aspect > 2.20 or len(points) < 5:
+            regularized.append(contour)
+            continue
+
+        try:
+            ellipse = cv2.fitEllipse(pts)
+        except Exception:
+            regularized.append(contour)
+            continue
+
+        fit_error = _ellipse_fit_error(points, ellipse)
+        if fit_error > max_fit_error:
+            regularized.append(contour)
+            continue
+
+        (_center, axes, _angle) = ellipse
+        longest_axis = max(float(axes[0]), float(axes[1]))
+        sample_count = int(max(24, min(128, round(longest_axis * 0.75))))
+        new_points = _ellipse_points(ellipse[0], axes, ellipse[2], sample_count)
+        regularized.append(
+            DetectedContour(
+                rule=contour.rule,
+                points=new_points,
+                area=contour.area,
+                closed=True,
+                is_hole=contour.is_hole,
+                raw_points=contour.raw_points,
+            )
+        )
+    return regularized
 
 
 def approximate_points(
@@ -814,6 +999,7 @@ def smart_smooth_contours(
                 area=contour.area,
                 closed=contour.closed,
                 is_hole=contour.is_hole,
+                raw_points=contour.raw_points,
             )
         )
     return smoothed
@@ -853,6 +1039,7 @@ def scale_hole_contours(
                 area=new_area,
                 closed=contour.closed,
                 is_hole=contour.is_hole,
+                raw_points=contour.raw_points,
             )
         )
     return scaled
@@ -1019,6 +1206,7 @@ def apply_bridge_tabs(
                     area=0.0,
                     closed=False,
                     is_hole=False,
+                    raw_points=segment,
                 )
             )
     return result
@@ -1132,8 +1320,10 @@ def dxf_layer_for_rule(rule: ColorRule, force_color_layers: bool = True) -> str:
     return color_layer_for_rule(rule, force_color_layers=force_color_layers)
 
 
-def _keep_hole_contour(contour: DetectedContour) -> bool:
+def _keep_hole_contour(contour: DetectedContour, preserve_tiny_holes: bool = True) -> bool:
     """Innenloecher moeglichst erhalten, nur echte Kleinstartefakte verwerfen."""
+    if not preserve_tiny_holes:
+        return False
     if not getattr(contour, "is_hole", False):
         return False
     return contour_filter_area_px(contour) >= 1.5
@@ -1142,7 +1332,8 @@ def _keep_hole_contour(contour: DetectedContour) -> bool:
 def remove_contours_smaller_than_mm2(
     contours: List[DetectedContour],
     min_area_mm2: float,
-    pixel_to_mm: float
+    pixel_to_mm: float,
+    preserve_tiny_holes: bool = True
 ) -> List[DetectedContour]:
     if min_area_mm2 <= 0:
         return contours
@@ -1150,14 +1341,15 @@ def remove_contours_smaller_than_mm2(
     return [
         contour
         for contour in contours
-        if _keep_hole_contour(contour) or contour_filter_area_mm2(contour, pixel_to_mm) >= min_area_mm2
+        if _keep_hole_contour(contour, preserve_tiny_holes) or contour_filter_area_mm2(contour, pixel_to_mm) >= min_area_mm2
     ]
 
 
 def remove_contours_smaller_than_percent(
     contours: List[DetectedContour],
     min_percent: float,
-    image_size: Tuple[int, int]
+    image_size: Tuple[int, int],
+    preserve_tiny_holes: bool = True
 ) -> List[DetectedContour]:
     if min_percent <= 0:
         return contours
@@ -1167,7 +1359,7 @@ def remove_contours_smaller_than_percent(
     return [
         contour
         for contour in contours
-        if _keep_hole_contour(contour) or contour_filter_area_px(contour) >= min_area_px
+        if _keep_hole_contour(contour, preserve_tiny_holes) or contour_filter_area_px(contour) >= min_area_px
     ]
 
 
@@ -1177,12 +1369,13 @@ def filter_small_contours(
     min_area_mm2: float,
     min_percent: float,
     image_size: Tuple[int, int],
-    pixel_to_mm: float
+    pixel_to_mm: float,
+    preserve_tiny_holes: bool = False
 ) -> List[DetectedContour]:
     if mode in ("mm²", "mm2"):
-        return remove_contours_smaller_than_mm2(contours, min_area_mm2, pixel_to_mm)
+        return remove_contours_smaller_than_mm2(contours, min_area_mm2, pixel_to_mm, preserve_tiny_holes)
     if mode in ("% Bildfläche", "percent"):
-        return remove_contours_smaller_than_percent(contours, min_percent, image_size)
+        return remove_contours_smaller_than_percent(contours, min_percent, image_size, preserve_tiny_holes)
     return contours
 
 
@@ -1455,6 +1648,7 @@ def find_contours_for_rule(
         points = [(float(x), float(y)) for x, y in pts]
         if smooth_iterations > 0:
             points = smooth_closed_points(points, smooth_iterations)
+        raw_points = list(points)
 
         epsilon = max(0.0, float(rule.epsilon))
         points = approximate_points(points, epsilon)
@@ -1468,7 +1662,7 @@ def find_contours_for_rule(
         if closed_paths_only and not is_closed_path(points):
             continue
 
-        result.append(DetectedContour(rule=rule, points=points, area=area, is_hole=is_hole))
+        result.append(DetectedContour(rule=rule, points=points, area=area, is_hole=is_hole, raw_points=raw_points))
 
     return result
 
@@ -1485,6 +1679,14 @@ def find_centerlines_for_rule(
     mask = merge_nearby_mask_lines(mask, merge_distance_px)
     mask = remove_small_components(mask, rule.min_area)
     mask = calm_mask_edges(mask, mask_edge_smoothing, mask_noise_area)
+    point_scale = 1.0
+    height, width = mask.shape[:2]
+    max_dim = max(height, width)
+    if max_dim > 1400:
+        point_scale = max_dim / 1400.0
+        new_width = max(1, int(round(width / point_scale)))
+        new_height = max(1, int(round(height / point_scale)))
+        mask = cv2.resize(mask, (new_width, new_height), interpolation=cv2.INTER_NEAREST)
     skeleton = zhang_suen_thinning(mask)
     paths = trace_skeleton_paths(skeleton)
 
@@ -1495,6 +1697,9 @@ def find_centerlines_for_rule(
         if len(points) < 2:
             continue
 
+        if point_scale != 1.0:
+            points = [(float(x) * point_scale, float(y) * point_scale) for x, y in points]
+        raw_points = list(points)
         points = approximate_points(points, epsilon, closed=closed)
         if remove_loose_points and closed:
             points = remove_loose_anchor_points(points)
@@ -1508,7 +1713,8 @@ def find_centerlines_for_rule(
                 points=points,
                 area=float(len(points)),
                 closed=closed,
-                is_hole=False
+                is_hole=False,
+                raw_points=raw_points,
             )
         )
 
@@ -1531,7 +1737,7 @@ def detect_all_contours(
     progress_callback=None
 ) -> List[DetectedContour]:
     all_contours: List[DetectedContour] = []
-    scale = max(1, min(3, int(internal_scale)))
+    scale = 1 if centerline_mode else max(1, min(3, int(internal_scale)))
     work_image = preprocess_vector_image(
         image_rgb,
         enabled=preprocess_enabled,
@@ -1601,6 +1807,7 @@ def detect_all_contours(
                 area=contour.area / area_scale,
                 closed=contour.closed,
                 is_hole=contour.is_hole,
+                raw_points=[(x / scale, y / scale) for x, y in contour.raw_points] if contour.raw_points else None,
             )
         )
     return restored
@@ -1781,7 +1988,7 @@ def export_dxf(
 
     existing_layers = set()
 
-    if dedupe_segments and not object_layers:
+    if dedupe_segments:
         unique_segments = unique_line_segments_from_contours(
             contours,
             tolerance_px=dedupe_tolerance_px,
@@ -1850,6 +2057,476 @@ def export_dxf(
             )
 
     doc.saveas(output_path)
+
+
+# -----------------------------------------------------------------------------
+# STL-Export: geschlossene Flächen als einfache Extrusion
+# -----------------------------------------------------------------------------
+
+def _stl_clean_loop(points: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    cleaned: List[Tuple[float, float]] = []
+    for x, y in points:
+        point = (float(x), float(y))
+        if not cleaned or point_distance(cleaned[-1], point) > 1e-6:
+            cleaned.append(point)
+    if len(cleaned) > 1 and point_distance(cleaned[0], cleaned[-1]) <= 1e-6:
+        cleaned.pop()
+    return cleaned
+
+
+def _stl_signed_area(points: List[Tuple[float, float]]) -> float:
+    if len(points) < 3:
+        return 0.0
+    area = 0.0
+    for index, point in enumerate(points):
+        next_point = points[(index + 1) % len(points)]
+        area += point[0] * next_point[1] - next_point[0] * point[1]
+    return area / 2.0
+
+
+def _stl_as_ccw(points: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    pts = _stl_clean_loop(points)
+    return pts if _stl_signed_area(pts) >= 0 else list(reversed(pts))
+
+
+def _stl_as_cw(points: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    pts = _stl_clean_loop(points)
+    return pts if _stl_signed_area(pts) <= 0 else list(reversed(pts))
+
+
+def _stl_point_in_triangle(
+    point: Tuple[float, float],
+    a: Tuple[float, float],
+    b: Tuple[float, float],
+    c: Tuple[float, float],
+) -> bool:
+    px, py = point
+    ax, ay = a
+    bx, by = b
+    cx, cy = c
+    v0x, v0y = cx - ax, cy - ay
+    v1x, v1y = bx - ax, by - ay
+    v2x, v2y = px - ax, py - ay
+    dot00 = v0x * v0x + v0y * v0y
+    dot01 = v0x * v1x + v0y * v1y
+    dot02 = v0x * v2x + v0y * v2y
+    dot11 = v1x * v1x + v1y * v1y
+    dot12 = v1x * v2x + v1y * v2y
+    denom = dot00 * dot11 - dot01 * dot01
+    if abs(denom) <= 1e-12:
+        return False
+    inv = 1.0 / denom
+    u = (dot11 * dot02 - dot01 * dot12) * inv
+    v = (dot00 * dot12 - dot01 * dot02) * inv
+    return u >= -1e-9 and v >= -1e-9 and (u + v) <= 1.0 + 1e-9
+
+
+def _stl_triangulate_simple_polygon(points: List[Tuple[float, float]]) -> List[Tuple[int, int, int]]:
+    pts = _stl_as_ccw(points)
+    count = len(pts)
+    if count < 3:
+        return []
+    if count == 3:
+        return [(0, 1, 2)]
+
+    remaining = list(range(count))
+    triangles: List[Tuple[int, int, int]] = []
+    guard = 0
+    while len(remaining) > 3 and guard < count * count:
+        guard += 1
+        ear_found = False
+        for pos, current in enumerate(remaining):
+            prev_index = remaining[(pos - 1) % len(remaining)]
+            next_index = remaining[(pos + 1) % len(remaining)]
+            a = pts[prev_index]
+            b = pts[current]
+            c = pts[next_index]
+            cross = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+            if cross <= 1e-12:
+                continue
+            contains_other = False
+            for test_index in remaining:
+                if test_index in (prev_index, current, next_index):
+                    continue
+                if _stl_point_in_triangle(pts[test_index], a, b, c):
+                    contains_other = True
+                    break
+            if contains_other:
+                continue
+            triangles.append((prev_index, current, next_index))
+            del remaining[pos]
+            ear_found = True
+            break
+        if not ear_found:
+            break
+
+    if len(remaining) == 3:
+        triangles.append((remaining[0], remaining[1], remaining[2]))
+
+    if not triangles:
+        # Fallback für Sonderfälle: Dreiecks-Fächer ab Punkt 0.
+        triangles = [(0, index, index + 1) for index in range(1, count - 1)]
+    return triangles
+
+
+def _stl_normal(
+    a: Tuple[float, float, float],
+    b: Tuple[float, float, float],
+    c: Tuple[float, float, float],
+) -> Tuple[float, float, float]:
+    ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+    vx, vy, vz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+    nx = uy * vz - uz * vy
+    ny = uz * vx - ux * vz
+    nz = ux * vy - uy * vx
+    length = math.sqrt(nx * nx + ny * ny + nz * nz)
+    if length <= 1e-12:
+        return (0.0, 0.0, 0.0)
+    return (nx / length, ny / length, nz / length)
+
+
+def _stl_write_facet(
+    handle: Any,
+    a: Tuple[float, float, float],
+    b: Tuple[float, float, float],
+    c: Tuple[float, float, float],
+) -> None:
+    nx, ny, nz = _stl_normal(a, b, c)
+    handle.write(f"  facet normal {nx:.8g} {ny:.8g} {nz:.8g}\n")
+    handle.write("    outer loop\n")
+    for x, y, z in (a, b, c):
+        handle.write(f"      vertex {x:.8g} {y:.8g} {z:.8g}\n")
+    handle.write("    endloop\n")
+    handle.write("  endfacet\n")
+
+
+def _stl_loop_side_facets(
+    handle: Any,
+    loop: List[Tuple[float, float]],
+    extrusion_mm: float,
+) -> int:
+    facets = 0
+    if len(loop) < 3:
+        return facets
+    for index, a2 in enumerate(loop):
+        b2 = loop[(index + 1) % len(loop)]
+        a0 = (a2[0], a2[1], 0.0)
+        b0 = (b2[0], b2[1], 0.0)
+        b1 = (b2[0], b2[1], extrusion_mm)
+        a1 = (a2[0], a2[1], extrusion_mm)
+        _stl_write_facet(handle, a0, b0, b1)
+        _stl_write_facet(handle, a0, b1, a1)
+        facets += 2
+    return facets
+
+
+def _stl_triangles_from_shapely(
+    shell: List[Tuple[float, float]],
+    holes: List[List[Tuple[float, float]]],
+) -> Optional[List[Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]]]:
+    try:
+        from shapely.geometry import Polygon
+        from shapely.ops import triangulate
+    except Exception:
+        return None
+
+    try:
+        polygon = Polygon(shell, holes if holes else None)
+        if not polygon.is_valid:
+            polygon = polygon.buffer(0)
+        if polygon.is_empty:
+            return []
+        polygons = [polygon]
+        if getattr(polygon, "geom_type", "") == "MultiPolygon":
+            polygons = list(polygon.geoms)
+        result: List[Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]] = []
+        for poly in polygons:
+            for tri in triangulate(poly):
+                probe = tri.representative_point()
+                if not poly.contains(probe) and not poly.touches(probe):
+                    continue
+                coords = list(tri.exterior.coords)[:3]
+                if len(coords) != 3:
+                    continue
+                tri_pts = [(float(x), float(y)) for x, y in coords]
+                tri_pts = _stl_as_ccw(tri_pts)
+                if len(tri_pts) == 3:
+                    result.append((tri_pts[0], tri_pts[1], tri_pts[2]))
+        return result
+    except Exception:
+        return None
+
+
+def _stl_contour_centroid(contour: DetectedContour) -> Tuple[float, float]:
+    pts = [(float(x), float(y)) for x, y in contour.points]
+    if not pts:
+        return (0.0, 0.0)
+    return (sum(x for x, _y in pts) / len(pts), sum(y for _x, y in pts) / len(pts))
+
+
+def _stl_point_inside_contour(contour: DetectedContour, point: Tuple[float, float]) -> bool:
+    pts = [(float(x), float(y)) for x, y in contour.points]
+    if len(pts) < 3:
+        return False
+    try:
+        poly = np.array(pts, dtype=np.float32).reshape(-1, 1, 2)
+        return bool(cv2.pointPolygonTest(poly, (float(point[0]), float(point[1])), False) >= 0)
+    except Exception:
+        return False
+
+
+
+def _stl_write_mask_grid_fallback(
+    handle: Any,
+    image_size: Tuple[int, int],
+    solid: DetectedContour,
+    hole_contours: List[DetectedContour],
+    pixel_to_mm: float,
+    extrusion_mm: float,
+    invert_y: bool = True,
+) -> int:
+    """Robuster STL-Fallback ohne Shapely: extrudiert eine Rastermaske mit echten Löchern.
+
+    Dieser Weg wird nur verwendet, wenn Innenlöcher vorhanden sind und keine
+    Polygon-Triangulation mit Shapely verfügbar ist. Die Geometrie bleibt dadurch
+    in der Draufsicht korrekt ausgespart, auch wenn die STL an den Rändern etwas
+    pixeliger sein kann.
+    """
+    width_px, height_px = image_size
+    width_px = max(1, int(round(width_px)))
+    height_px = max(1, int(round(height_px)))
+    scale = max(1e-9, float(pixel_to_mm))
+    height = max(0.001, float(extrusion_mm))
+
+    mask = np.zeros((height_px, width_px), dtype=np.uint8)
+
+    def _pts_to_cv(points: List[Tuple[float, float]]) -> Optional[np.ndarray]:
+        if len(points) < 3:
+            return None
+        pts = []
+        for x, y in points:
+            xi = int(round(float(x)))
+            yi = int(round(float(y)))
+            xi = max(0, min(width_px - 1, xi))
+            yi = max(0, min(height_px - 1, yi))
+            pts.append([xi, yi])
+        if len(pts) < 3:
+            return None
+        return np.array(pts, dtype=np.int32)
+
+    solid_pts = _pts_to_cv([(float(x), float(y)) for x, y in solid.points])
+    if solid_pts is None:
+        return 0
+    cv2.fillPoly(mask, [solid_pts], 255)
+    for hole in hole_contours:
+        hole_pts = _pts_to_cv([(float(x), float(y)) for x, y in hole.points])
+        if hole_pts is not None:
+            cv2.fillPoly(mask, [hole_pts], 0)
+
+    filled = mask > 0
+    if not bool(np.any(filled)):
+        return 0
+
+    def pxy(x: float, y: float, z: float) -> Tuple[float, float, float]:
+        yy = (float(height_px) - float(y)) if invert_y else float(y)
+        return (float(x) * scale, yy * scale, float(z))
+
+    def write_quad(a, b, c, d, flip: bool = False) -> int:
+        if flip:
+            _stl_write_facet(handle, a, c, b)
+            _stl_write_facet(handle, a, d, c)
+        else:
+            _stl_write_facet(handle, a, b, c)
+            _stl_write_facet(handle, a, c, d)
+        return 2
+
+    facets = 0
+
+    # Top-/Bottom-Flächen als horizontale Runs zusammenfassen.
+    for y in range(height_px):
+        x = 0
+        while x < width_px:
+            if not filled[y, x]:
+                x += 1
+                continue
+            x0 = x
+            while x < width_px and filled[y, x]:
+                x += 1
+            x1 = x
+            # Pixelzelle: [x0, x1] x [y, y+1]
+            a_top = pxy(x0, y, height)
+            b_top = pxy(x1, y, height)
+            c_top = pxy(x1, y + 1, height)
+            d_top = pxy(x0, y + 1, height)
+            facets += write_quad(a_top, b_top, c_top, d_top, flip=False)
+            a_bot = pxy(x0, y, 0.0)
+            b_bot = pxy(x1, y, 0.0)
+            c_bot = pxy(x1, y + 1, 0.0)
+            d_bot = pxy(x0, y + 1, 0.0)
+            facets += write_quad(a_bot, b_bot, c_bot, d_bot, flip=True)
+
+    # Seitenwände an allen Maskenkanten. Segmente werden pro Kante zusammengefasst.
+    # Vertikale Kanten x = konstant.
+    for x in range(width_px + 1):
+        y = 0
+        while y < height_px:
+            left = filled[y, x - 1] if x > 0 else False
+            right = filled[y, x] if x < width_px else False
+            if left == right:
+                y += 1
+                continue
+            y0 = y
+            while y < height_px:
+                left2 = filled[y, x - 1] if x > 0 else False
+                right2 = filled[y, x] if x < width_px else False
+                if left2 == right2:
+                    break
+                y += 1
+            y1 = y
+            a = pxy(x, y0, 0.0)
+            b = pxy(x, y1, 0.0)
+            c = pxy(x, y1, height)
+            d = pxy(x, y0, height)
+            facets += write_quad(a, b, c, d, flip=bool(right and not left))
+
+    # Horizontale Kanten y = konstant.
+    for y in range(height_px + 1):
+        x = 0
+        while x < width_px:
+            top = filled[y - 1, x] if y > 0 else False
+            bottom = filled[y, x] if y < height_px else False
+            if top == bottom:
+                x += 1
+                continue
+            x0 = x
+            while x < width_px:
+                top2 = filled[y - 1, x] if y > 0 else False
+                bottom2 = filled[y, x] if y < height_px else False
+                if top2 == bottom2:
+                    break
+                x += 1
+            x1 = x
+            a = pxy(x0, y, 0.0)
+            b = pxy(x1, y, 0.0)
+            c = pxy(x1, y, height)
+            d = pxy(x0, y, height)
+            facets += write_quad(a, b, c, d, flip=bool(top and not bottom))
+
+    return facets
+
+
+def export_stl_extruded(
+    output_path: str,
+    image_size: Tuple[int, int],
+    contours: List[DetectedContour],
+    pixel_to_mm: float,
+    extrusion_mm: float,
+    selected_indices: Optional[set[int]] = None,
+    invert_y: bool = True,
+) -> int:
+    """Exportiert ausgewählte geschlossene Konturen als einfache extrudierte ASCII-STL.
+
+    Die STL-Datei verwendet Millimeter als Modellmaß. Geschlossene Nicht-Loch-Konturen
+    werden als Volumenkörper extrudiert. Aktiv ausgewählte Innenloch-Konturen innerhalb einer ausgewählten
+    Außenkontur werden, falls Shapely verfügbar ist, in der Deckfläche berücksichtigt;
+    Seitenwände der Löcher werden immer geschrieben.
+    """
+    _width_px, height_px = image_size
+    scale = max(1e-9, float(pixel_to_mm))
+    height = max(0.001, float(extrusion_mm))
+    selected = set(selected_indices) if selected_indices is not None else set(range(len(contours)))
+
+    def convert_loop(points: List[Tuple[float, float]], clockwise: bool = False) -> List[Tuple[float, float]]:
+        converted: List[Tuple[float, float]] = []
+        for x_px, y_px in points:
+            x_mm = float(x_px) * scale
+            y_source = (float(height_px) - float(y_px)) if invert_y else float(y_px)
+            y_mm = y_source * scale
+            converted.append((x_mm, y_mm))
+        return _stl_as_cw(converted) if clockwise else _stl_as_ccw(converted)
+
+    solids: List[tuple[int, DetectedContour]] = []
+    holes = [
+        item for index, item in enumerate(contours)
+        if index in selected
+        and getattr(item.rule, "export", True)
+        and bool(getattr(item, "closed", False))
+        and bool(getattr(item, "is_hole", False))
+        and len(getattr(item, "points", []) or []) >= 3
+    ]
+
+    for index, item in enumerate(contours):
+        if index not in selected:
+            continue
+        if not getattr(item.rule, "export", True):
+            continue
+        if not bool(getattr(item, "closed", False)) or bool(getattr(item, "is_hole", False)):
+            continue
+        if len(getattr(item, "points", []) or []) < 3:
+            continue
+        solids.append((index, item))
+
+    if not solids:
+        raise ValueError("Keine geschlossene Fläche für STL ausgewählt.")
+
+    facet_count = 0
+    with open(output_path, "w", encoding="ascii", newline="\n") as handle:
+        handle.write("solid vektorrazor_extrusion\n")
+        for _index, solid in solids:
+            shell = convert_loop(solid.points, clockwise=False)
+            if len(shell) < 3 or abs(_stl_signed_area(shell)) <= 1e-9:
+                continue
+
+            matching_holes: List[List[Tuple[float, float]]] = []
+            matching_hole_contours: List[DetectedContour] = []
+            for hole in holes:
+                centroid = _stl_contour_centroid(hole)
+                if _stl_point_inside_contour(solid, centroid):
+                    hole_loop = convert_loop(hole.points, clockwise=True)
+                    if len(hole_loop) >= 3 and abs(_stl_signed_area(hole_loop)) > 1e-9:
+                        matching_holes.append(hole_loop)
+                        matching_hole_contours.append(hole)
+
+            shapely_triangles = _stl_triangles_from_shapely(shell, matching_holes)
+            if shapely_triangles is not None:
+                for a2, b2, c2 in shapely_triangles:
+                    top = (a2[0], a2[1], height), (b2[0], b2[1], height), (c2[0], c2[1], height)
+                    bottom = (c2[0], c2[1], 0.0), (b2[0], b2[1], 0.0), (a2[0], a2[1], 0.0)
+                    _stl_write_facet(handle, *top)
+                    _stl_write_facet(handle, *bottom)
+                    facet_count += 2
+                facet_count += _stl_loop_side_facets(handle, shell, height)
+                for hole_loop in matching_holes:
+                    facet_count += _stl_loop_side_facets(handle, hole_loop, height)
+            elif matching_hole_contours:
+                # Ohne Shapely wurde früher nur die Außenfläche trianguliert; dadurch war
+                # das Loch in der STL-Oberfläche sichtbar umrandet, aber nicht ausgespart.
+                # Dieser Raster-Fallback erzeugt die Deck-/Bodenfläche aus einer echten
+                # Maske und lässt gewählte Innenlöcher zuverlässig offen.
+                facet_count += _stl_write_mask_grid_fallback(
+                    handle,
+                    image_size,
+                    solid,
+                    matching_hole_contours,
+                    scale,
+                    height,
+                    invert_y=invert_y,
+                )
+            else:
+                # Fallback ohne optionale Geometrie-Bibliothek und ohne Löcher: Außenkontur triangulieren.
+                triangles = _stl_triangulate_simple_polygon(shell)
+                for ia, ib, ic in triangles:
+                    a2, b2, c2 = shell[ia], shell[ib], shell[ic]
+                    _stl_write_facet(handle, (a2[0], a2[1], height), (b2[0], b2[1], height), (c2[0], c2[1], height))
+                    _stl_write_facet(handle, (c2[0], c2[1], 0.0), (b2[0], b2[1], 0.0), (a2[0], a2[1], 0.0))
+                    facet_count += 2
+                facet_count += _stl_loop_side_facets(handle, shell, height)
+
+        handle.write("endsolid vektorrazor_extrusion\n")
+
+    if facet_count <= 0:
+        raise ValueError("STL konnte nicht erzeugt werden: keine gültigen Flächen.")
+    return facet_count
 
 
 class ColorRow:
