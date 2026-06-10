@@ -4,29 +4,28 @@
 # This file is part of Vektorrazor.
 
 """
-Vektor Gen - PNG zu CAD-näheren Vektorkonturen
+Vektorisierungs-Engine für CAD-nahe Konturen.
 
-MVP-Version:
-- PNG laden
-- Farben dynamisch eintragen
-- RGB-Toleranz je Farbe
-- Mindestfläche je Farbe
-- Konturen erkennen
-- Punkte reduzieren
-- Vorschau anzeigen
-- Export als SVG oder DXF
+Diese Datei enthält die eigentliche Geometrie- und Exportlogik. Aus einem
+technisch vorbereiteten Rasterbild werden Konturen extrahiert, aufbereitet,
+vereinfacht und anschließend für Vorschau oder Export bereitgestellt.
 
-Empfehlung:
-Python 3.10 oder neuer
+Zentrale Aufgaben:
+- Detektion zusammenhängender Flächen und Konturen
+- Approximation und Vereinfachung der Polygonzüge
+- Umrechnung in SVG-, DXF- oder weiterverarbeitbare Geometriedaten
+- Hilfsfunktionen für Bounding-Boxen, Skalierung und Export-Kompatibilität
 
-Installation:
-pip install -r requirements.txt
-
-Start:
-python app.py
+Die Trennung zu Schritt 1 ist bewusst klar:
+- Schritt 1 macht das Bild technisch sauber
+- vector_engine.py macht daraus verwertbare Vektorgeometrie
 """
 
 from __future__ import annotations
+
+# Diese Engine arbeitet bewusst auf Basis bereits vorbereiteter Zwischenbilder.
+# Je sauberer Schritt 1 arbeitet, desto stabiler und CAD-näher wird die spätere
+# Konturvereinfachung und der Export.
 
 import math
 from dataclasses import dataclass

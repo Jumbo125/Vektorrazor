@@ -5,8 +5,18 @@
 
 """UI-Aufbau für Workflow-Schritt 2.
 
-Ausgelagert aus workflow_app.py, damit die Hauptdatei kleiner bleibt.
-Die Funktionen erwarten weiterhin die WorkflowApp-Instanz als erstes Argument.
+Diese Datei bündelt den grafischen Aufbau des zweiten Workflow-Schritts.
+Schritt 2 übernimmt das in Schritt 1 vorbereitete Zwischenbild und stellt alle
+Bedienelemente bereit, die für Konturerkennung, Glättung, Punktreduktion,
+Vorschau und Export gebraucht werden.
+
+Der Fokus liegt hier auf der Oberfläche:
+- Parameterfelder für Vektorisierung und Vereinfachung
+- Vorschauflächen und Schnellaktionen
+- Export-nahe Steuerelemente für SVG/DXF und CAD-nahe Ausgabeoptionen
+
+Die eigentliche Berechnung bleibt weiterhin in workflow_app.py und
+vector_engine.py gekapselt.
 """
 
 from __future__ import annotations
@@ -350,23 +360,11 @@ def _build_step2(self) -> None:
         )
         self.complexity_hint_label.pack(side="left", padx=(4, 0))
 
-        self.preview_view_frame = ttk.Frame(opts_outer)
-        self.preview_view_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        preview_view_label = ttk.Label(self.preview_view_frame, text=tr("step2.preview_mode"))
-        preview_view_label.grid(row=0, column=0, sticky="w", padx=(0, 4))
-        self._register_i18n(preview_view_label, "text", "step2.preview_mode")
-        self.preview_mode_box = ttk.Combobox(
-            self.preview_view_frame,
-            textvariable=self.preview_mode_display_var,
-            values=[self._preview_label(key) for key in PREVIEW_MODE_KEYS],
-            state="readonly",
-            width=18,
-        )
-        self.preview_mode_box.grid(row=0, column=1, sticky="w", padx=(4, 12))
-        self.preview_mode_box.bind("<<ComboboxSelected>>", lambda _event: self.on_preview_mode_display_changed())
-
+        # Die eigentliche Vorschauansicht wird nicht in den Vektor-Optionen platziert.
+        # Sie gehört direkt zur Dokument-/Vorschaufläche und wird dort oberhalb der
+        # beiden Preview-Canvases aufgebaut.
         opts = ttk.Frame(opts_outer)
-        opts.grid(row=2, column=0, sticky="nsew")
+        opts.grid(row=1, column=0, sticky="nsew")
         self.vector_options_frame = opts
         opts.columnconfigure(1, weight=1)
         opts.columnconfigure(3, weight=1)
@@ -395,21 +393,6 @@ def _build_step2(self) -> None:
         ttk.Scale(opts, from_=0.0, to=5.0, variable=self.global_epsilon_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.global_epsilon_var, value, 2)).grid(row=30, column=1, sticky="ew", padx=(4, 4), pady=(8, 0))
         ttk.Spinbox(opts, from_=0.0, to=5.0, increment=0.01, textvariable=self.global_epsilon_var, width=8, format="%.2f").grid(row=30, column=2, sticky="w", pady=(8, 0))
         ttk.Label(opts, textvariable=self.cad_point_count_var, foreground="#555").grid(row=30, column=3, columnspan=2, sticky="w", padx=(8, 0), pady=(8, 0))
-        cad_dialog_btn = tk.Button(
-            opts,
-            text=tr("step2.open_cad_cleanup"),
-            command=self.open_cad_cleanup_dialog,
-            bg="#7c3aed",
-            fg="white",
-            activebackground="#6d28d9",
-            activeforeground="white",
-            relief="flat",
-            padx=12,
-            pady=5,
-            font=("Segoe UI", 9, "bold"),
-        )
-        cad_dialog_btn.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        self._register_i18n(cad_dialog_btn, "text", "step2.open_cad_cleanup")
         ttk.Button(opts, text="Epsilon auf alle Farben anwenden", command=self.apply_global_epsilon_to_rows).grid(row=31, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.high_detail_btn = ttk.Button(opts, text=tr("step2.high_detail"), command=self.apply_high_detail_mode)
         self.high_detail_btn.grid(row=6, column=0, columnspan=2, sticky="w", pady=(6, 0))
@@ -519,8 +502,7 @@ def _build_step2(self) -> None:
 
         select_tools = ttk.LabelFrame(preview, text="Pfad-Auswahl", padding=(6, 4, 6, 4))
         select_tools.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        select_tools.columnconfigure(5, weight=1)
-        select_tools.columnconfigure(8, weight=1)
+        select_tools.columnconfigure(4, weight=1)
         self.selection_mode_check = ttk.Checkbutton(
             select_tools,
             text="Auswahl-Modus",
@@ -538,31 +520,62 @@ def _build_step2(self) -> None:
         )
         anchor_check.grid(row=0, column=3, sticky="w", padx=(0, 8))
         self._register_i18n(anchor_check, "text", "step2.show_anchor_points")
-        ttk.Label(select_tools, text="Zoom").grid(row=0, column=4, sticky="w", padx=(8, 4))
-        self.step2_zoom_scale = ttk.Scale(
+        ttk.Label(select_tools, textvariable=self.selected_contour_text_var, foreground="#555").grid(row=0, column=4, sticky="w")
+        ttk.Label(
             select_tools,
-            from_=0.25,
-            to=8.0,
-            variable=self.step2_shared_zoom_var,
-            orient="horizontal",
-            command=self.on_step2_shared_zoom_changed,
+            text="Auswahl-Modus EIN: Klick = Pfad wählen, STRG+Klick = hinzufügen/umschalten, ALT+Klick = direkt entfernen. Auswahl-Modus AUS: Klick/Ziehen verschiebt die Vorschau; nur STRG+Klick wählt temporär.",
+            foreground="#777",
+            wraplength=840,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=5, sticky="w", pady=(3, 0))
+
+        preview_doc = ttk.LabelFrame(preview, text="Dokument / Vorschau", padding=(6, 4, 6, 6))
+        preview_doc.grid(row=1, column=0, sticky="nsew")
+        preview_doc.columnconfigure(0, weight=1)
+        preview_doc.rowconfigure(0, weight=0)
+        preview_doc.rowconfigure(1, weight=1)
+
+        # Die Vorschauansicht wirkt direkt auf die beiden Preview-Canvases.
+        # Deshalb steht die Auswahl hier sichtbar oberhalb der Vorschau und nicht
+        # versteckt im Vektor-Optionen-Block.
+        self.preview_view_frame = ttk.Frame(preview_doc)
+        self.preview_view_frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self.preview_view_frame.columnconfigure(11, weight=1)
+        preview_view_label = ttk.Label(self.preview_view_frame, text=tr("step2.preview_mode"))
+        preview_view_label.grid(row=0, column=0, sticky="w", padx=(0, 4))
+        self._register_i18n(preview_view_label, "text", "step2.preview_mode")
+        self.preview_mode_box = ttk.Combobox(
+            self.preview_view_frame,
+            textvariable=self.preview_mode_display_var,
+            values=[self._preview_label(key) for key in PREVIEW_MODE_KEYS],
+            state="readonly",
+            width=18,
         )
-        self.step2_zoom_scale.grid(row=0, column=5, sticky="ew", padx=(0, 8))
+        self.preview_mode_box.grid(row=0, column=1, sticky="w", padx=(4, 14))
+        self.preview_mode_box.bind("<<ComboboxSelected>>", lambda _event: self.on_preview_mode_display_changed())
+
+        ttk.Label(self.preview_view_frame, text="Zoom").grid(row=0, column=2, sticky="w", padx=(0, 4))
+        # Die Zoom-Bedienung steht direkt neben der Vorschau-Ansicht, weil beide
+        # Einstellungen unmittelbar die Preview-Canvases betreffen.
+        # Feste Klick-Schritte bleiben performanter als Mausrad oder freier Slider.
+        ttk.Button(self.preview_view_frame, text="−5%", command=lambda: self.step2_zoom_step(-5)).grid(row=0, column=3, sticky="w", padx=(0, 4))
         self.step2_zoom_spin = ttk.Spinbox(
-            select_tools,
+            self.preview_view_frame,
             from_=25,
             to=800,
-            increment=1,
+            increment=5,
             textvariable=self.step2_zoom_percent_var,
             width=7,
             format="%.0f",
             command=self.on_step2_zoom_spin_changed,
         )
-        self.step2_zoom_spin.grid(row=0, column=6, sticky="w", padx=(0, 6))
+        self.step2_zoom_spin.grid(row=0, column=4, sticky="w", padx=(0, 4))
         self.step2_zoom_spin.bind("<Return>", lambda _event: self.on_step2_zoom_spin_changed())
         self.step2_zoom_spin.bind("<FocusOut>", lambda _event: self.on_step2_zoom_spin_changed())
+        ttk.Button(self.preview_view_frame, text="+5%", command=lambda: self.step2_zoom_step(5)).grid(row=0, column=5, sticky="w", padx=(0, 4))
+        ttk.Button(self.preview_view_frame, text="100%", command=lambda: self.set_step2_zoom_percent(100)).grid(row=0, column=6, sticky="w", padx=(0, 6))
         self.step2_zoom_preset_box = ttk.Combobox(
-            select_tools,
+            self.preview_view_frame,
             textvariable=self.step2_zoom_preset_var,
             values=["25%", "50%", "75%", "100%", "150%", "200%", "300%", "400%", "800%"],
             state="readonly",
@@ -570,29 +583,23 @@ def _build_step2(self) -> None:
         )
         self.step2_zoom_preset_box.grid(row=0, column=7, sticky="w", padx=(0, 8))
         self.step2_zoom_preset_box.bind("<<ComboboxSelected>>", lambda _event: self.on_step2_zoom_preset_changed())
-        ttk.Label(select_tools, textvariable=self.selected_contour_text_var, foreground="#555").grid(row=0, column=8, sticky="w")
-        ttk.Label(
-            select_tools,
-            text="Auswahl-Modus EIN: Klick = Pfad wählen, STRG+Klick = hinzufügen/umschalten, ALT+Klick = direkt entfernen. Auswahl-Modus AUS: Klick/Ziehen verschiebt die Vorschau; nur STRG+Klick wählt temporär.",
-            foreground="#777",
-            wraplength=840,
-            justify="left",
-        ).grid(row=1, column=0, columnspan=9, sticky="w", pady=(3, 0))
 
-        preview_doc = ttk.LabelFrame(preview, text="Dokument / Vorschau", padding=(6, 4, 6, 6))
-        preview_doc.grid(row=1, column=0, sticky="nsew")
-        preview_doc.columnconfigure(0, weight=1)
-        preview_doc.rowconfigure(0, weight=1)
         preview_panes = ttk.Panedwindow(preview_doc, orient=tk.HORIZONTAL)
-        preview_panes.grid(row=0, column=0, sticky="nsew")
+        preview_panes.grid(row=1, column=0, sticky="nsew")
         self.step2_original_canvas = recolor.ZoomImageCanvas(
-            preview_panes, "Zwischen-PNG", zoom_callback=self.on_step2_canvas_zoom_changed
+            preview_panes,
+            "Zwischen-PNG",
+            zoom_callback=self.on_step2_canvas_zoom_changed,
+            mousewheel_zoom_enabled=False,
+            fast_pan=True,
         )
         self.step2_vector_canvas = recolor.ZoomImageCanvas(
             preview_panes,
             "Vektor-Vorschau",
             zoom_callback=self.on_step2_canvas_zoom_changed,
             overlay_draw_callback=self.draw_vector_canvas_overlay,
+            mousewheel_zoom_enabled=False,
+            fast_pan=True,
         )
         # Robuste Pfad-Auswahl: Wir hängen uns zusätzlich an den normalen Klick.
         # Dadurch funktioniert Auswahl auch dann, wenn STRG/ALT-Bindings vom System/Tk nicht sauber ankommen.
@@ -606,7 +613,7 @@ def _build_step2(self) -> None:
 
         bottom_actions = ttk.LabelFrame(preview, text=tr("step2.actions"), padding=(8, 6, 8, 6))
         bottom_actions.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-        bottom_actions.columnconfigure(2, weight=1)
+        bottom_actions.columnconfigure(4, weight=1)
         self.step2_actions_frame = bottom_actions
         self._register_i18n(bottom_actions, "text", "step2.actions")
 
@@ -628,9 +635,30 @@ def _build_step2(self) -> None:
         self.step2_back_action_btn.grid(row=0, column=0, sticky="w", padx=(0, 8))
         self._register_i18n(self.step2_back_action_btn, "text", "nav.back_to_step1")
 
+        # Vorexport/Feinschliff steht direkt vor den Export-Buttons.
+        # Damit ist sichtbar: Diese Vereinfachung ist eine letzte technische Kontrolle,
+        # bevor DXF/SVG/STL geschrieben werden.
+        self.cad_cleanup_action_btn = tk.Button(
+            bottom_actions,
+            text=tr("step2.preexport_cleanup"),
+            command=self.open_cad_cleanup_dialog,
+            bg="#7c3aed",
+            fg="white",
+            activebackground="#6d28d9",
+            activeforeground="white",
+            relief="raised",
+            bd=1,
+            padx=14,
+            pady=6,
+            font=("Segoe UI", 9, "bold"),
+            cursor="hand2",
+        )
+        self.cad_cleanup_action_btn.grid(row=0, column=1, sticky="w", padx=(0, 8))
+        self._register_i18n(self.cad_cleanup_action_btn, "text", "step2.preexport_cleanup")
+
         self.export_action_btn = tk.Button(
             bottom_actions,
-            text=tr("nav.export"),
+            text=tr("step2.export_final"),
             command=self.export_vector_file,
             bg="#15803d",
             fg="white",
@@ -643,12 +671,12 @@ def _build_step2(self) -> None:
             font=("Segoe UI", 9, "bold"),
             cursor="hand2",
         )
-        self.export_action_btn.grid(row=0, column=1, sticky="w", padx=(0, 12))
-        self._register_i18n(self.export_action_btn, "text", "nav.export")
+        self.export_action_btn.grid(row=0, column=2, sticky="w", padx=(0, 8))
+        self._register_i18n(self.export_action_btn, "text", "step2.export_final")
 
         self.scale_export_action_btn = tk.Button(
             bottom_actions,
-            text=tr("nav.scale_export"),
+            text=tr("step2.export_scaled"),
             command=self.open_scaled_export_dialog,
             bg="#0f766e",
             fg="white",
@@ -661,8 +689,8 @@ def _build_step2(self) -> None:
             font=("Segoe UI", 9, "bold"),
             cursor="hand2",
         )
-        self.scale_export_action_btn.grid(row=0, column=2, sticky="w", padx=(0, 12))
-        self._register_i18n(self.scale_export_action_btn, "text", "nav.scale_export")
+        self.scale_export_action_btn.grid(row=0, column=3, sticky="w", padx=(0, 12))
+        self._register_i18n(self.scale_export_action_btn, "text", "step2.export_scaled")
 
         panes.add(settings, weight=2)
         panes.add(preview, weight=5)
@@ -704,7 +732,7 @@ def _build_vector_colors_modal(self) -> None:
             relief="raised",
             bd=1,
             padx=12,
-            pady=3,
+            pady=4,
             font=("Segoe UI", 9, "bold"),
             cursor="hand2",
         )

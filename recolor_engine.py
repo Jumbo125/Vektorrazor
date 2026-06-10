@@ -232,11 +232,20 @@ class ZoomImageCanvas(ttk.Frame):
         picker_callback: Optional[Callable[[RGB, int, int], None]] = None,
         zoom_callback: Optional[Callable[[float], None]] = None,
         overlay_draw_callback: Optional[Callable[["ZoomImageCanvas"], None]] = None,
+        mousewheel_zoom_enabled: bool = True,
+        fast_pan: bool = False,
     ) -> None:
         super().__init__(parent)
         self.picker_callback = picker_callback
         self.zoom_callback = zoom_callback
         self.overlay_draw_callback = overlay_draw_callback
+        # Schritt 2 kann sehr große technische Raster- und Vektorvorschauen anzeigen.
+        # Dort ist Mausrad-Zoom teuer, weil jeder Tick ein neues PIL/Tk-Bild erzeugt.
+        # Für diese Fälle kann der Zoom bewusst über Buttons gesteuert werden.
+        self.mousewheel_zoom_enabled = bool(mousewheel_zoom_enabled)
+        # Fast-Pan reduziert die Anzahl kompletter Re-Render-Vorgänge während des Ziehens.
+        # Dadurch bleibt das Verschieben bei großen Vorschauen deutlich reaktionsfähiger.
+        self.fast_pan = bool(fast_pan)
         self.image: Optional[Image.Image] = None
         self.tk_image: Optional[ImageTk.PhotoImage] = None
         self.zoom = 1.0
@@ -252,11 +261,14 @@ class ZoomImageCanvas(ttk.Frame):
         self.canvas = tk.Canvas(self, bg="#303030", highlightthickness=1, highlightbackground="#808080")
         self.canvas.pack(fill="both", expand=True)
 
-        # Windows/macOS Mausrad
-        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
-        # Linux Mausrad
-        self.canvas.bind("<Button-4>", self._on_mousewheel)
-        self.canvas.bind("<Button-5>", self._on_mousewheel)
+        # Windows/macOS/Linux Mausrad.
+        # Im normalen Bearbeitungsmodus bleibt Mausrad-Zoom erhalten.
+        # In Schritt 2 kann er deaktiviert werden, weil Plus/Minus-Zoom in festen
+        # Schritten wesentlich weniger versehentliche teure Re-Renders auslöst.
+        wheel_handler = self._on_mousewheel if self.mousewheel_zoom_enabled else self._ignore_mousewheel
+        self.canvas.bind("<MouseWheel>", wheel_handler)
+        self.canvas.bind("<Button-4>", wheel_handler)
+        self.canvas.bind("<Button-5>", wheel_handler)
 
         # Linke Maustaste:
         # - kurzer Klick = Farbe aufnehmen, falls ein Picker gesetzt ist
@@ -408,9 +420,15 @@ class ZoomImageCanvas(ttk.Frame):
         self.canvas.create_rectangle(4, ch - 26, 96, ch - 4, fill="#111111", outline="")
         self.canvas.create_text(50, ch - 15, text=f"Zoom {self.zoom * 100:.0f}%", fill="white")
 
-    def _on_mousewheel(self, event: tk.Event) -> None:
+    def _ignore_mousewheel(self, _event: tk.Event) -> str:
+        # Bewusst blockiert: In performancelastigen Vorschauen wird Zoom über
+        # feste Plus/Minus-Schritte gesteuert. Das verhindert ungewollte Serien
+        # von Resize-Operationen durch das Mausrad.
+        return "break"
+
+    def _on_mousewheel(self, event: tk.Event) -> str:
         if self.image is None:
-            return
+            return "break"
 
         old_zoom = self.zoom
         if getattr(event, "num", None) == 4 or getattr(event, "delta", 0) > 0:
@@ -431,6 +449,7 @@ class ZoomImageCanvas(ttk.Frame):
         self.offset_y = event.y - img_y * new_zoom
         self.schedule_render()
         self._notify_zoom_changed()
+        return "break"
 
     def _pick_pixel_at_canvas_pos(self, canvas_x: int, canvas_y: int) -> None:
         if self.image is None or self.picker_callback is None:
@@ -456,7 +475,10 @@ class ZoomImageCanvas(ttk.Frame):
             self._left_dragged = True
         self.offset_x = ox + dx
         self.offset_y = oy + dy
-        self.render()
+        if self.fast_pan:
+            self.schedule_render(35)
+        else:
+            self.render()
 
     def _end_left_action(self, event: tk.Event) -> None:
         if self._left_press is None:
@@ -468,6 +490,10 @@ class ZoomImageCanvas(ttk.Frame):
         # Nur ein echter kurzer Klick nimmt Farbe auf. Ziehen verschiebt nur das Bild.
         if not moved:
             self._pick_pixel_at_canvas_pos(event.x, event.y)
+        elif self.fast_pan:
+            # Nach dem Loslassen einmal final rendern, damit die Vorschau exakt
+            # am letzten Offset liegt, auch wenn während des Ziehens gedrosselt wurde.
+            self.render()
 
     def _start_pan(self, event: tk.Event) -> None:
         self._pan_start = (event.x, event.y, self.offset_x, self.offset_y)
@@ -478,7 +504,10 @@ class ZoomImageCanvas(ttk.Frame):
         sx, sy, ox, oy = self._pan_start
         self.offset_x = ox + (event.x - sx)
         self.offset_y = oy + (event.y - sy)
-        self.render()
+        if self.fast_pan:
+            self.schedule_render(35)
+        else:
+            self.render()
 
 
 # -----------------------------------------------------------------------------
@@ -580,6 +609,8 @@ class PhotoScanCleanupResult:
     image: Image.Image
     detected: list[DetectedColor]
     analysis: PhotoScanAnalysis
+    variant: str = ""
+    technical_score: float = 0.0
 
 
 # -----------------------------------------------------------------------------
@@ -1516,6 +1547,982 @@ class RecolorApp(tk.Tk):
         return image.resize(new_size, Image.Resampling.LANCZOS), scale
 
     @staticmethod
+    def _component_filtered_color_accent_mask(
+        raw_mask: np.ndarray,
+        total_valid: int,
+        image_width: int,
+        image_height: int,
+        *,
+        min_area_ratio: float = 0.000008,
+        max_area_ratio: float = 0.025,
+        max_span_ratio: float = 0.18,
+    ) -> np.ndarray:
+        """Behaelt kleine/markante Farbakzente, aber keine grossen Hauptflaechen.
+
+        Der Zweck ist nicht, farbige Logos farbig zu lassen, sondern z. B. rote Sterne
+        oder gruene Schrift im Schwarz/Weiss-Modus als kontrastierende Aussparung zu
+        erhalten. Grosse Farbflaechen wie Baender, Himmel, Wald oder Fluss werden hier
+        bewusst nicht als Akzent behandelt.
+        """
+        if raw_mask.size == 0 or not np.any(raw_mask):
+            return np.zeros_like(raw_mask, dtype=bool)
+        labels_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(raw_mask.astype(np.uint8), connectivity=8)
+        keep = np.zeros_like(raw_mask, dtype=bool)
+        if labels_count <= 1:
+            return keep
+        min_area = max(3, int(round(float(max(1, total_valid)) * float(min_area_ratio))))
+        max_area = max(min_area, int(round(float(max(1, total_valid)) * float(max_area_ratio))))
+        max_w = max(2, int(round(float(max(1, image_width)) * float(max_span_ratio))))
+        max_h = max(2, int(round(float(max(1, image_height)) * float(max_span_ratio))))
+        for label_id in range(1, labels_count):
+            area = int(stats[label_id, cv2.CC_STAT_AREA])
+            width = int(stats[label_id, cv2.CC_STAT_WIDTH])
+            height = int(stats[label_id, cv2.CC_STAT_HEIGHT])
+            if area < min_area:
+                continue
+            # Lange Baender/Grossflaechen nicht als Akzent schuetzen.
+            if area > max_area and (width > max_w or height > max_h):
+                continue
+            if width > max_w or height > max_h:
+                continue
+            keep[labels == label_id] = True
+        return keep
+
+    @staticmethod
+    def _apply_local_opposite_to_accent_mask(out_rgba: np.ndarray, accent_mask: np.ndarray, alpha_mask: Optional[np.ndarray] = None) -> np.ndarray:
+        """Faerbt Akzent-Komponenten schwarz oder weiss je nach lokaler Umgebung.
+
+        Beispiel: roter Stern im schwarzen Ring -> weisser Stern.
+        Gruene Schrift auf schwarzem Ring -> weisse Schrift.
+        Farbakzent auf hellem Papier -> schwarze Zeichnung.
+        """
+        if out_rgba.size == 0 or accent_mask.size == 0 or not np.any(accent_mask):
+            return out_rgba
+        if alpha_mask is None:
+            valid = out_rgba[:, :, 3] > 0
+        else:
+            valid = alpha_mask.astype(bool)
+        labels_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(accent_mask.astype(np.uint8), connectivity=8)
+        if labels_count <= 1:
+            return out_rgba
+        gray_out = (
+            0.299 * out_rgba[:, :, 0].astype(np.float32)
+            + 0.587 * out_rgba[:, :, 1].astype(np.float32)
+            + 0.114 * out_rgba[:, :, 2].astype(np.float32)
+        )
+        black_now = valid & np.all(out_rgba[:, :, 0:3] <= 20, axis=2)
+        for label_id in range(1, labels_count):
+            component = labels == label_id
+            if not np.any(component):
+                continue
+            width = int(stats[label_id, cv2.CC_STAT_WIDTH])
+            height = int(stats[label_id, cv2.CC_STAT_HEIGHT])
+            # Eher enger Ring: fuer Sterne/Schrift auf schwarzem Band nicht zu viel weisses Umfeld mitnehmen.
+            radius = max(2, min(11, int(round(max(width, height) * 0.10)) + 1))
+            ksize = radius * 2 + 1
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
+            dilated = cv2.dilate(component.astype(np.uint8), kernel, iterations=1) > 0
+            ring = dilated & ~component & valid
+            if int(np.count_nonzero(ring)) < 6:
+                ring = ~component & valid
+            if np.any(ring):
+                black_ratio = float(np.mean(black_now[ring]))
+                surrounding = float(np.median(gray_out[ring]))
+            else:
+                black_ratio = 0.0
+                surrounding = 255.0
+            # Primär nach echter Schwarz-Nachbarschaft entscheiden, sonst über Helligkeit fallbacken.
+            use_white = (black_ratio >= 0.35) or (black_ratio >= 0.20 and surrounding < 150.0) or (surrounding < 110.0)
+            target = 255 if use_white else 0
+            out_rgba[component, 0:3] = target
+            out_rgba[component, 3] = 255
+        return out_rgba
+
+    @staticmethod
+    def _detect_small_color_accents(
+        rgb: np.ndarray,
+        gray: np.ndarray,
+        sat: np.ndarray,
+        lab_distance: np.ndarray,
+        alpha: np.ndarray,
+        total_valid: int,
+        *,
+        foreground_distance: float = 24.0,
+    ) -> np.ndarray:
+        """Findet kleine bunte Akzente unabhaengig davon, ob sie schon Vordergrund sind."""
+        if rgb.size == 0:
+            return np.zeros(alpha.shape, dtype=bool)
+        h, w = alpha.shape
+        valid_gray = gray[alpha]
+        p96 = float(np.percentile(valid_gray, 96)) if valid_gray.size else 245.0
+        raw = (
+            alpha
+            & (sat >= 0.135)
+            & (lab_distance >= max(8.0, float(foreground_distance) * 0.62))
+            & (gray.astype(np.float32) <= min(248.0, p96 + 8.0))
+        )
+        return RecolorApp._component_filtered_color_accent_mask(raw, total_valid, w, h)
+
+    @staticmethod
+    def _photo_scan_foreground_mask_from_result(image: Image.Image) -> np.ndarray:
+        rgba = np.array(image.convert("RGBA"), dtype=np.uint8)
+        alpha = rgba[:, :, 3] > 0
+        rgb = rgba[:, :, :3]
+        return alpha & np.any(rgb < 245, axis=2)
+
+    @staticmethod
+    def _detected_colors_from_mask(mask: np.ndarray, total_valid: int, rgb: RGB = (0, 0, 0), target: RGB = (0, 0, 0)) -> list[DetectedColor]:
+        count = int(np.count_nonzero(mask))
+        if count <= 0:
+            return []
+        return [DetectedColor(source_rgb=rgb, target_rgb=target, pixels=count, percent=(count / max(1, total_valid)) * 100.0, palette_name="Schwarz")]
+
+
+    @staticmethod
+    def _rebuild_photo_scan_detected_from_technical_image(
+        result: PhotoScanCleanupResult,
+    ) -> PhotoScanCleanupResult:
+        """Ermittelt die Farbzählung eines technischen Foto-/Scan-Ergebnisses neu.
+
+        Das ist bewusst klein gehalten: Weiß ist Hintergrund, alle anderen
+        exakten RGB-Farben gelten als technische Zielfarben. Es wird nur die
+        Statistik aktualisiert, nicht das Bild neu berechnet.
+        """
+        try:
+            arr = np.array(result.image.convert("RGBA"), dtype=np.uint8)
+            if arr.size == 0:
+                return result
+            alpha = arr[:, :, 3] > 0
+            rgb = arr[:, :, :3]
+            total_valid = max(1, int(np.count_nonzero(alpha)))
+            non_background = alpha & ~((rgb[:, :, 0] >= 248) & (rgb[:, :, 1] >= 248) & (rgb[:, :, 2] >= 248))
+            if not np.any(non_background):
+                result.detected = []
+                return result
+            existing_by_rgb = {tuple(int(v) for v in item.target_rgb): item for item in result.detected}
+            colors = np.unique(rgb[non_background].reshape(-1, 3), axis=0)
+            updated: list[DetectedColor] = []
+            for color in colors:
+                target_rgb = tuple(int(v) for v in color.tolist())
+                count = int(np.count_nonzero(alpha & np.all(rgb == color.reshape(1, 1, 3), axis=2)))
+                if count <= 0:
+                    continue
+                old = existing_by_rgb.get(target_rgb)
+                updated.append(
+                    DetectedColor(
+                        source_rgb=old.source_rgb if old is not None else target_rgb,
+                        target_rgb=target_rgb,
+                        pixels=count,
+                        percent=(count / total_valid) * 100.0,
+                        palette_name=old.palette_name if old is not None else rgb_to_text(target_rgb),
+                    )
+                )
+            updated.sort(key=lambda item: item.pixels, reverse=True)
+            result.detected = updated
+            return result
+        except Exception:
+            return result
+
+    @staticmethod
+    def _quiet_photo_scan_color_speckles(
+        result: PhotoScanCleanupResult,
+        min_area: int = 8,
+        preserve_thin_lines: bool = True,
+    ) -> PhotoScanCleanupResult:
+        """Entfernt kleine farbige Einzelinseln aus dem technischen Foto-/Scan-Ergebnis.
+
+        Der Auto-Modus darf feine Linien behalten, soll aber Papierkorn und einzelne
+        blaue/rote/grüne Fremdpunkte nicht als eigene technische Zielfarbe ausgeben.
+        Deshalb wird jede Ziel-RGB-Maske separat beruhigt: kleine Inseln werden
+        entfernt, lange dünne Komponenten bleiben erhalten.
+        """
+        try:
+            min_area = max(1, int(min_area))
+            original_size = result.image.size
+            longest = max(1, max(original_size))
+            max_process_edge = 1200
+            if longest > max_process_edge:
+                scale = float(max_process_edge) / float(longest)
+                small_size = (
+                    max(1, int(round(original_size[0] * scale))),
+                    max(1, int(round(original_size[1] * scale))),
+                )
+                small_result = PhotoScanCleanupResult(
+                    result.image.resize(small_size, Image.Resampling.NEAREST),
+                    list(result.detected),
+                    result.analysis,
+                    result.variant,
+                    result.technical_score,
+                )
+                small_result = RecolorApp._quiet_photo_scan_color_speckles(
+                    small_result,
+                    min_area=max(1, int(round(float(min_area) * scale * scale))),
+                    preserve_thin_lines=preserve_thin_lines,
+                )
+                small_total_valid = max(1, int(np.count_nonzero(np.array(small_result.image.convert("RGBA"), dtype=np.uint8)[:, :, 3] > 0)))
+                small_result.image = small_result.image.resize(original_size, Image.Resampling.NEAREST)
+                inv_area = 1.0 / max(1e-9, scale * scale)
+                estimated_total_valid = max(1, int(round(float(small_total_valid) * inv_area)))
+                for item in small_result.detected:
+                    item.pixels = int(round(float(item.pixels) * inv_area))
+                    item.percent = (item.pixels / estimated_total_valid) * 100.0
+                small_result.variant = result.variant
+                small_result.technical_score = result.technical_score
+                return small_result
+
+            image = result.image.convert("RGBA")
+            arr = np.array(image, dtype=np.uint8)
+            if arr.size == 0:
+                return result
+            alpha = arr[:, :, 3] > 0
+            rgb = arr[:, :, :3]
+            h, w = alpha.shape
+            non_background = alpha & ~((rgb[:, :, 0] >= 248) & (rgb[:, :, 1] >= 248) & (rgb[:, :, 2] >= 248))
+            if not np.any(non_background):
+                return result
+            colors = np.unique(rgb[non_background].reshape(-1, 3), axis=0)
+            cleaned_any = False
+            for color in colors:
+                mask = alpha & np.all(rgb == color.reshape(1, 1, 3), axis=2)
+                if int(np.count_nonzero(mask)) <= 0:
+                    continue
+                labels_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+                if labels_count <= 1:
+                    continue
+                areas = stats[1:, cv2.CC_STAT_AREA].astype(np.int64)
+                widths = stats[1:, cv2.CC_STAT_WIDTH].astype(np.int64)
+                heights = stats[1:, cv2.CC_STAT_HEIGHT].astype(np.int64)
+                spans = np.maximum(widths, heights)
+                mins = np.maximum(1, np.minimum(widths, heights))
+                line_like = (
+                    bool(preserve_thin_lines)
+                    & (areas >= max(2, min_area // 3))
+                    & (spans >= max(8, min(h, w) // 170))
+                    & ((mins <= max(4, min(h, w) // 120)) | ((spans / mins.astype(np.float32)) >= 2.4))
+                )
+                keep_criteria = (areas >= min_area) | line_like
+                keep = np.zeros(labels_count, dtype=bool)
+                keep[1:] = keep_criteria
+                clean_mask = keep[labels]
+                removed = mask & ~clean_mask
+                if np.any(removed):
+                    arr[removed, 0:3] = 255
+                    cleaned_any = True
+            if not cleaned_any:
+                return result
+            new_image = Image.fromarray(arr, "RGBA")
+            total_valid = max(1, int(np.count_nonzero(arr[:, :, 3] > 0)))
+            updated_detected: list[DetectedColor] = []
+            for item in result.detected:
+                target = np.array(item.target_rgb, dtype=np.uint8).reshape(1, 1, 3)
+                count = int(np.count_nonzero((arr[:, :, 3] > 0) & np.all(arr[:, :, :3] == target, axis=2)))
+                if count <= 0:
+                    continue
+                updated_detected.append(
+                    DetectedColor(
+                        source_rgb=item.source_rgb,
+                        target_rgb=item.target_rgb,
+                        pixels=count,
+                        percent=(count / total_valid) * 100.0,
+                        palette_name=item.palette_name,
+                    )
+                )
+            result.image = new_image
+            result.detected = updated_detected
+            return result
+        except Exception:
+            return result
+
+    @staticmethod
+    def _solidify_photo_scan_technical_image(
+        result: PhotoScanCleanupResult,
+        speckle_area: int = 18,
+        hole_area: int = 80,
+        preserve_thin_lines: bool = True,
+    ) -> PhotoScanCleanupResult:
+        """Macht das technische Foto-/Scan-Ergebnis flächiger.
+
+        Performance-Version:
+        Kleine Fremdfarb-Inseln und weiße Löcher werden nicht mehr Komponente
+        für Komponente mit eigener Nachbarschaftssuche abgearbeitet. Stattdessen
+        werden die kleinen Komponenten gesammelt und mit einer vektorisierten
+        lokalen Mehrheitsfarbe ersetzt. Das ist bei großen Scans deutlich
+        schneller und verhindert lange Hänger bei „Masken werden bereinigt“.
+        """
+        try:
+            speckle_area = max(1, int(speckle_area))
+            hole_area = max(speckle_area, int(hole_area))
+            original_size = result.image.size
+            longest = max(1, max(original_size))
+
+            # Die Bereinigung ist bewusst eine technische Zwischenstufe. Für die
+            # Entscheidung, welche Mini-Inseln verschwinden, reicht eine moderate
+            # Arbeitsgröße völlig aus. Danach wird wieder mit NEAREST skaliert,
+            # damit die exakten Zielfarben erhalten bleiben.
+            max_process_edge = 900
+            if longest > max_process_edge:
+                scale = float(max_process_edge) / float(longest)
+                small_size = (
+                    max(1, int(round(original_size[0] * scale))),
+                    max(1, int(round(original_size[1] * scale))),
+                )
+                small_result = PhotoScanCleanupResult(
+                    result.image.resize(small_size, Image.Resampling.NEAREST),
+                    list(result.detected),
+                    result.analysis,
+                    result.variant,
+                    result.technical_score,
+                )
+                small_result = RecolorApp._solidify_photo_scan_technical_image(
+                    small_result,
+                    speckle_area=max(1, int(round(float(speckle_area) * scale * scale))),
+                    hole_area=max(1, int(round(float(hole_area) * scale * scale))),
+                    preserve_thin_lines=preserve_thin_lines,
+                )
+                small_total_valid = max(
+                    1,
+                    int(np.count_nonzero(np.array(small_result.image.convert("RGBA"), dtype=np.uint8)[:, :, 3] > 0)),
+                )
+                small_result.image = small_result.image.resize(original_size, Image.Resampling.NEAREST)
+                inv_area = 1.0 / max(1e-9, scale * scale)
+                estimated_total_valid = max(1, int(round(float(small_total_valid) * inv_area)))
+                for item in small_result.detected:
+                    item.pixels = int(round(float(item.pixels) * inv_area))
+                    item.percent = (item.pixels / estimated_total_valid) * 100.0
+                small_result.variant = result.variant
+                small_result.technical_score = result.technical_score
+                return small_result
+
+            arr = np.array(result.image.convert("RGBA"), dtype=np.uint8)
+            if arr.size == 0:
+                return result
+
+            alpha = arr[:, :, 3] > 0
+            h, w = alpha.shape
+            if h <= 0 or w <= 0:
+                return result
+
+            rgb = arr[:, :, :3]
+            white_mask = alpha & ((rgb[:, :, 0] >= 248) & (rgb[:, :, 1] >= 248) & (rgb[:, :, 2] >= 248))
+            non_white = alpha & ~white_mask
+            if not np.any(non_white):
+                return result
+
+            colors = np.unique(rgb[non_white].reshape(-1, 3), axis=0)
+            if colors.size == 0:
+                return result
+
+            # Maximal kleine Komponenten umfaerben. Wenn extrem viele Mikro-Inseln
+            # entstehen, ist eine vollstaendige exakte Behandlung nicht sinnvoll;
+            # dann arbeitet die globale Mehrheitskorrektur trotzdem sauber und schnell.
+            changed = False
+            remove_mask = np.zeros((h, w), dtype=bool)
+
+            for color in colors:
+                color_mask = alpha & np.all(rgb == color.reshape(1, 1, 3), axis=2)
+                if not np.any(color_mask):
+                    continue
+                labels_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+                    color_mask.astype(np.uint8), connectivity=8
+                )
+                if labels_count <= 1:
+                    continue
+
+                areas = stats[1:, cv2.CC_STAT_AREA].astype(np.int64)
+                widths = stats[1:, cv2.CC_STAT_WIDTH].astype(np.int64)
+                heights = stats[1:, cv2.CC_STAT_HEIGHT].astype(np.int64)
+                spans = np.maximum(widths, heights)
+                min_sides = np.maximum(1, np.minimum(widths, heights))
+                line_like = (
+                    bool(preserve_thin_lines)
+                    & (areas >= max(2, speckle_area // 4))
+                    & (spans >= max(8, min(h, w) // 170))
+                    & ((min_sides <= max(4, min(h, w) // 120)) | ((spans / min_sides.astype(np.float32)) >= 2.6))
+                )
+                small = (areas < speckle_area) & ~line_like
+                if not np.any(small):
+                    continue
+                remove_lookup = np.zeros(labels_count, dtype=bool)
+                remove_lookup[1:] = small
+                remove_mask |= remove_lookup[labels]
+
+            # Kleine weiße Löcher innerhalb farbiger Flächen sammeln.
+            hole_mask = np.zeros((h, w), dtype=bool)
+            labels_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(white_mask.astype(np.uint8), connectivity=8)
+            if labels_count > 1:
+                areas = stats[1:, cv2.CC_STAT_AREA].astype(np.int64)
+                lefts = stats[1:, cv2.CC_STAT_LEFT].astype(np.int64)
+                tops = stats[1:, cv2.CC_STAT_TOP].astype(np.int64)
+                widths = stats[1:, cv2.CC_STAT_WIDTH].astype(np.int64)
+                heights = stats[1:, cv2.CC_STAT_HEIGHT].astype(np.int64)
+                inside = (lefts > 0) & (tops > 0) & ((lefts + widths) < w) & ((tops + heights) < h)
+                small_holes = (areas > 0) & (areas <= hole_area) & inside
+                if np.any(small_holes):
+                    hole_lookup = np.zeros(labels_count, dtype=bool)
+                    hole_lookup[1:] = small_holes
+                    hole_mask = hole_lookup[labels]
+
+            if not np.any(remove_mask) and not np.any(hole_mask):
+                return result
+
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)).astype(np.uint8)
+            palette = [np.array((255, 255, 255), dtype=np.uint8)] + [np.array(c, dtype=np.uint8) for c in colors]
+
+            def _apply_majority(target_mask: np.ndarray, allow_white: bool) -> bool:
+                if not np.any(target_mask):
+                    return False
+                counts: list[np.ndarray] = []
+                candidates: list[np.ndarray] = []
+                for candidate in palette:
+                    is_white = bool(np.all(candidate >= 248))
+                    if is_white and not allow_white:
+                        continue
+                    mask = alpha & np.all(arr[:, :, :3] == candidate.reshape(1, 1, 3), axis=2)
+                    if not np.any(mask):
+                        continue
+                    # Anzahl Nachbarpixel dieser Farbe im 5x5 Umfeld.
+                    cnt = cv2.filter2D(mask.astype(np.uint8), cv2.CV_16U, kernel, borderType=cv2.BORDER_CONSTANT)
+                    counts.append(cnt)
+                    candidates.append(candidate)
+                if not counts:
+                    return False
+                stack = np.stack(counts, axis=0)
+                best_idx = np.argmax(stack, axis=0)
+                best_count = np.max(stack, axis=0)
+                valid = target_mask & (best_count >= 1)
+                if not np.any(valid):
+                    return False
+                for idx, candidate in enumerate(candidates):
+                    selected = valid & (best_idx == idx)
+                    if np.any(selected):
+                        arr[selected, 0:3] = candidate.reshape(1, 3)
+                return True
+
+            # Fremdfarbpunkte dürfen weiß werden, wenn sie im Papierbereich liegen.
+            changed = _apply_majority(remove_mask, allow_white=True) or changed
+            # Weiße Löcher sollen nur mit echter Zielfarbe gefüllt werden, nicht wieder weiß.
+            changed = _apply_majority(hole_mask, allow_white=False) or changed
+
+            if not changed:
+                return result
+
+            new_image = Image.fromarray(arr, "RGBA")
+            total_valid = max(1, int(np.count_nonzero(arr[:, :, 3] > 0)))
+            existing_by_rgb = {tuple(item.target_rgb): item for item in result.detected}
+            updated_detected: list[DetectedColor] = []
+            rgb_now = arr[:, :, :3]
+            non_white_now = alpha & ~((rgb_now[:, :, 0] >= 248) & (rgb_now[:, :, 1] >= 248) & (rgb_now[:, :, 2] >= 248))
+            if np.any(non_white_now):
+                for color in np.unique(rgb_now[non_white_now].reshape(-1, 3), axis=0):
+                    target_rgb = tuple(int(v) for v in color.tolist())
+                    count = int(np.count_nonzero(alpha & np.all(rgb_now == color.reshape(1, 1, 3), axis=2)))
+                    if count <= 0:
+                        continue
+                    old = existing_by_rgb.get(target_rgb)
+                    updated_detected.append(
+                        DetectedColor(
+                            source_rgb=old.source_rgb if old is not None else target_rgb,
+                            target_rgb=target_rgb,
+                            pixels=count,
+                            percent=(count / total_valid) * 100.0,
+                            palette_name=old.palette_name if old is not None else rgb_to_text(target_rgb),
+                        )
+                    )
+            result.image = new_image
+            result.detected = updated_detected
+            return result
+        except Exception:
+            return result
+
+    @staticmethod
+    def _score_photo_scan_result(original: Image.Image, result: PhotoScanCleanupResult, variant: str = "balanced") -> float:
+        try:
+            work_original, _scale = RecolorApp._limited_work_image(original.convert("RGBA"), max_edge=900)
+            work_result = result.image.convert("RGBA")
+            if work_result.size != work_original.size:
+                work_result = work_result.resize(work_original.size, Image.Resampling.NEAREST)
+            rgba = np.array(work_original, dtype=np.uint8)
+            rgb = rgba[:, :, :3]
+            alpha = rgba[:, :, 3] > 0
+            gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+            foreground = RecolorApp._photo_scan_foreground_mask_from_result(work_result) & alpha
+            total = max(1, int(np.count_nonzero(alpha)))
+            fg_pixels = int(np.count_nonzero(foreground))
+            coverage = fg_pixels / float(total)
+            if fg_pixels <= 0:
+                return -9999.0
+
+            cand_u8 = foreground.astype(np.uint8) * 255
+            orig_edges = cv2.Canny(gray, 45, 135) > 0
+            cand_edges = cv2.Canny(cand_u8, 45, 135) > 0
+            edge_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            orig_edges_wide = cv2.dilate(orig_edges.astype(np.uint8), edge_kernel, iterations=1) > 0
+            edge_match = float(np.count_nonzero(cand_edges & orig_edges_wide)) / float(max(1, np.count_nonzero(cand_edges)))
+
+            label_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(foreground.astype(np.uint8), connectivity=8)
+            areas = stats[1:, cv2.CC_STAT_AREA].astype(np.int64) if label_count > 1 else np.array([], dtype=np.int64)
+            small = int(np.count_nonzero((areas > 0) & (areas <= max(2, total * 0.000015))))
+            tiny_ratio = small / max(1.0, float(label_count - 1))
+            largest_ratio = float(areas.max()) / float(max(1, fg_pixels)) if areas.size else 0.0
+            component_density = (label_count - 1) / max(1.0, fg_pixels / 1000.0)
+
+            out_rgb = np.array(work_result.convert("RGB"), dtype=np.uint8)
+            non_bg = out_rgb[foreground]
+            unique_colors = np.unique(non_bg.reshape(-1, 3), axis=0).shape[0] if non_bg.size else 0
+            color_penalty = max(0, int(unique_colors) - (1 if variant == "bw" else 4)) * 0.9
+
+            if variant == "clean":
+                target_low, target_high = 0.010, 0.42
+                density_weight, detail_weight = 1.2, 0.7
+            elif variant == "detail":
+                target_low, target_high = 0.004, 0.62
+                density_weight, detail_weight = 0.65, 1.25
+            elif variant == "color":
+                target_low, target_high = 0.008, 0.58
+                density_weight, detail_weight = 0.9, 1.0
+            elif variant == "bw":
+                target_low, target_high = 0.004, 0.55
+                density_weight, detail_weight = 0.8, 1.15
+            else:
+                target_low, target_high = 0.008, 0.52
+                density_weight, detail_weight = 1.0, 1.0
+
+            coverage_penalty = 0.0
+            if coverage < target_low:
+                coverage_penalty += (target_low - coverage) * 240.0
+            if coverage > target_high:
+                coverage_penalty += (coverage - target_high) * 60.0
+
+            score = 0.0
+            score += edge_match * 36.0 * detail_weight
+            score += min(18.0, largest_ratio * 18.0)
+            score -= tiny_ratio * 22.0 * density_weight
+            score -= min(18.0, component_density * 0.18) * density_weight
+            score -= coverage_penalty
+            score -= color_penalty
+            score -= max(0.0, result.analysis.background_noise - 12.0) * 0.15
+            return float(score)
+        except Exception:
+            return -9999.0
+
+    @staticmethod
+    def build_photo_scan_black_white_image(
+        image: Image.Image,
+        min_area: int = 4,
+        noise_suppression: int = 62,
+        foreground_distance: int = 24,
+        weak_contrast: int = 70,
+        protect_background: bool = True,
+        protect_thin_lines: bool = True,
+        close_lines: bool = True,
+        fill_small_holes: bool = False,
+        preserve_color_accents: bool = False,
+        max_work_edge: int = 1500,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        cancel_callback: Optional[Callable[[], bool]] = None,
+    ) -> PhotoScanCleanupResult:
+        def progress(value: float, key: str) -> None:
+            if progress_callback is not None:
+                progress_callback(float(value), key)
+
+        def check_cancel() -> None:
+            if cancel_callback is not None and cancel_callback():
+                raise InterruptedError("cancelled")
+
+        original_size = image.size
+        progress(8, "progress.prepare_image")
+        work_image, work_scale = RecolorApp._limited_work_image(image, max_edge=max_work_edge)
+        rgba = np.array(work_image.convert("RGBA"), dtype=np.uint8)
+        rgb = rgba[:, :, :3]
+        alpha = rgba[:, :, 3] > 0
+        h, w = alpha.shape
+        total_valid = int(np.count_nonzero(alpha))
+        analysis = RecolorApp.analyze_photo_scan_logo_problem(work_image)
+        if total_valid <= 0:
+            out = np.zeros((h, w, 4), dtype=np.uint8)
+            return PhotoScanCleanupResult(Image.fromarray(out, "RGBA"), [], analysis, "bw", 0.0)
+
+        progress(22, "progress.photo_scan_background")
+        check_cancel()
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+        hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+        sat = hsv[:, :, 1].astype(np.float32) / 255.0
+        valid_gray = gray[alpha]
+        p50 = float(np.percentile(valid_gray, 50))
+        p82 = float(np.percentile(valid_gray, 82))
+        bright_bg = alpha & (gray >= max(160, int(p82 - 6))) & (sat <= 0.45)
+        if int(np.count_nonzero(bright_bg)) < max(64, total_valid * 0.03):
+            bright_bg = alpha & (gray >= int(p50))
+        bg_rgb = np.median(rgb[bright_bg].astype(np.float32), axis=0) if np.any(bright_bg) else np.median(rgb[alpha].astype(np.float32), axis=0)
+        bg_lab = cv2.cvtColor(np.uint8([[bg_rgb]]), cv2.COLOR_RGB2LAB).astype(np.float32)[0, 0]
+        lab_distance = np.linalg.norm(lab - bg_lab.reshape(1, 1, 3), axis=2)
+
+        progress(40, "progress.photo_scan_main_masks")
+        check_cancel()
+        clahe = cv2.createCLAHE(clipLimit=2.0 + max(0, weak_contrast) / 70.0, tileGridSize=(8, 8))
+        gray_clahe = clahe.apply(gray)
+        block = max(15, int(round(min(h, w) / 22.0)) | 1)
+        block = min(block, 101)
+        local_inv = cv2.adaptiveThreshold(gray_clahe, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, block, 7)
+        local_bg = cv2.GaussianBlur(gray.astype(np.float32), (0, 0), max(2.0, min(h, w) * 0.012))
+        local_dark = local_bg - gray.astype(np.float32)
+        _thr, otsu_inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        weak_factor = max(0.0, min(1.0, weak_contrast / 100.0))
+        noise_factor = max(0.0, min(1.0, noise_suppression / 100.0))
+        color_term = lab_distance >= max(4.0, foreground_distance * (0.68 + noise_factor * 0.20))
+        dark_term = local_dark >= max(2.0, 10.0 - weak_factor * 7.0)
+        foreground = alpha & (((local_inv > 0) & (dark_term | color_term)) | ((otsu_inv > 0) & (gray < p82 - 8)))
+        foreground |= alpha & color_term & (sat >= 0.08)
+
+        if protect_background:
+            background_like = alpha & (lab_distance < max(3.0, foreground_distance * 0.55)) & (gray >= max(135, p50 - 5)) & (sat <= 0.36)
+            foreground &= ~background_like
+
+        # Allgemeine Schutzregel für kleine Farbakzente:
+        # kleine, inhaltlich wichtige Elemente sollen nicht durch eine rein
+        # globale Schwarzfärbung unsichtbar werden. Stattdessen werden sie als
+        # eigene Komponenten gemerkt und erst beim Rendern lokal kontrastierend
+        # schwarz oder weiß gesetzt.
+        # Farbakzente (z. B. rote Sterne/gruene Schrift) werden im S/W-Modus
+        # NICHT mehr einfach zum schwarzen Vordergrund addiert. Sonst sind sie auf
+        # einem schwarzen Ring zwar erkannt, werden aber schwarz und verschwinden.
+        # Stattdessen merken wir die Komponenten separat und faerben sie beim Rendern
+        # lokal gegensaetzlich: dunkle Umgebung -> weiss, helle Umgebung -> schwarz.
+        accent_preserve_mask = np.zeros_like(foreground, dtype=bool)
+        if preserve_color_accents:
+            accent_preserve_mask = RecolorApp._detect_small_color_accents(
+                rgb,
+                gray,
+                sat,
+                lab_distance,
+                alpha,
+                total_valid,
+                foreground_distance=float(foreground_distance),
+            )
+
+        progress(56, "progress.photo_scan_detail_masks")
+        check_cancel()
+        if protect_thin_lines:
+            edges = cv2.Canny(gray_clahe, 32, 120) > 0
+            edge_dark = edges & alpha & ((local_dark >= max(1.5, 6.0 - weak_factor * 4.0)) | color_term)
+            foreground |= edge_dark
+
+        progress(70, "progress.photo_scan_cleanup")
+        check_cancel()
+        mask_u8 = (foreground.astype(np.uint8) * 255)
+        if close_lines:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, k, iterations=1)
+        if fill_small_holes:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, k, iterations=1)
+        if noise_suppression >= 55:
+            k = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+            opened = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, k, iterations=1)
+            if protect_thin_lines:
+                mask_u8 = np.maximum(opened, (foreground.astype(np.uint8) * 255))
+            else:
+                mask_u8 = opened
+
+        labels_count, labels, stats, _centroids = cv2.connectedComponentsWithStats((mask_u8 >= 128).astype(np.uint8), connectivity=8)
+        cleaned = np.zeros((h, w), dtype=bool)
+        min_area = max(1, int(min_area))
+        if labels_count > 1:
+            areas = stats[1:, cv2.CC_STAT_AREA].astype(np.int64)
+            widths = stats[1:, cv2.CC_STAT_WIDTH].astype(np.int64)
+            heights = stats[1:, cv2.CC_STAT_HEIGHT].astype(np.int64)
+            spans = np.maximum(widths, heights)
+            mins = np.maximum(1, np.minimum(widths, heights))
+            long_thin = protect_thin_lines & (spans >= max(7, min(h, w) // 180)) & (
+                (mins <= max(4, min(h, w) // 110)) | ((spans / mins.astype(np.float32)) >= 2.2)
+            )
+            criteria = (areas >= min_area) | long_thin
+            keep = np.zeros(labels_count, dtype=bool)
+            keep[1:] = criteria
+            cleaned = keep[labels]
+
+        if preserve_color_accents and np.any(accent_preserve_mask):
+            # Akzentpixel aus dem schwarzen Grund entfernen, damit sie als weisse
+            # Aussparung sichtbar werden koennen, wenn die Umgebung dunkel ist.
+            cleaned = cleaned & ~accent_preserve_mask
+
+        out = np.zeros((h, w, 4), dtype=np.uint8)
+        out[:, :, 0:3] = 255
+        out[:, :, 3] = rgba[:, :, 3]
+        out[cleaned, 0:3] = 0
+        if preserve_color_accents and np.any(accent_preserve_mask):
+            out = RecolorApp._apply_local_opposite_to_accent_mask(out, accent_preserve_mask, alpha)
+        result_image = Image.fromarray(out, "RGBA")
+        black_mask_for_stats = alpha & np.all(out[:, :, 0:3] <= 12, axis=2)
+        detected = RecolorApp._detected_colors_from_mask(black_mask_for_stats, total_valid, (0, 0, 0), (0, 0, 0))
+        if result_image.size != original_size:
+            result_image = result_image.resize(original_size, Image.Resampling.NEAREST)
+            if work_scale > 0:
+                inv_area = 1.0 / max(1e-9, work_scale * work_scale)
+                estimated_total_valid = max(1, int(round(float(total_valid) * inv_area)))
+                for item in detected:
+                    item.pixels = int(round(float(item.pixels) * inv_area))
+                    item.percent = (item.pixels / estimated_total_valid) * 100.0
+        result = PhotoScanCleanupResult(result_image, detected, analysis, "bw", 0.0)
+        result.technical_score = RecolorApp._score_photo_scan_result(image, result, "bw")
+        progress(100, "progress.render_preview")
+        return result
+
+    @staticmethod
+    def build_photo_scan_faded_print_image(
+        image: Image.Image,
+        min_area: int = 3,
+        noise_suppression: int = 54,
+        weak_contrast: int = 92,
+        close_lines: bool = True,
+        max_work_edge: int = 1300,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        cancel_callback: Optional[Callable[[], bool]] = None,
+    ) -> PhotoScanCleanupResult:
+        """Spezialmodus fuer sehr schwachen/verblassten Druck.
+
+        Anders als die normale Farbreduktion sucht dieser Weg keine stabilen
+        Motivfarben. Er schaetzt den Papier-/Lichtverlauf, zieht ihn ab,
+        verstaerkt lokale Druckspuren und erzeugt daraus eine Schwarz/Weiss-
+        Maske. Geeignet fuer schwache Stempel, alte Etiketten und Papierfotos,
+        bei denen Motivfarbe und Hintergrund fast gleich sind.
+        """
+        def progress(value: float, key: str) -> None:
+            if progress_callback is not None:
+                progress_callback(float(value), key)
+
+        def check_cancel() -> None:
+            if cancel_callback is not None and cancel_callback():
+                raise InterruptedError("cancelled")
+
+        original_size = image.size
+        progress(8, "progress.prepare_image")
+        work_image, work_scale = RecolorApp._limited_work_image(image, max_edge=max_work_edge)
+        rgba = np.array(work_image.convert("RGBA"), dtype=np.uint8)
+        rgb = rgba[:, :, :3]
+        alpha = rgba[:, :, 3] > 0
+        h, w = alpha.shape
+        total_valid = int(np.count_nonzero(alpha))
+        analysis = RecolorApp.analyze_photo_scan_logo_problem(work_image)
+        if total_valid <= 0:
+            out = np.zeros((h, w, 4), dtype=np.uint8)
+            return PhotoScanCleanupResult(Image.fromarray(out, "RGBA"), [], analysis, "faded", 0.0)
+
+        progress(20, "progress.photo_scan_faded_background")
+        check_cancel()
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        gray_f = gray.astype(np.float32)
+        longest = max(h, w)
+        # Großer Weichzeichner: Papierfarbe, Schatten und Scanner-Vignette schaetzen.
+        sigma_large = max(12.0, float(longest) * 0.045)
+        background = cv2.GaussianBlur(gray_f, (0, 0), sigmaX=sigma_large, sigmaY=sigma_large)
+        residual_dark = background - gray_f
+        residual_abs = np.abs(gray_f - background)
+
+        progress(38, "progress.photo_scan_faded_contrast")
+        check_cancel()
+        # Lokaler Kontrast auf dem abgezogenen Signal, nicht auf der Rohfarbe.
+        norm = residual_dark.copy()
+        norm[~alpha] = 0.0
+        p_high = float(np.percentile(norm[alpha], 99.2)) if np.any(alpha) else 1.0
+        norm = np.clip(norm * (255.0 / max(1.0, p_high)), 0, 255).astype(np.uint8)
+        clip = 2.0 + max(0, min(100, int(weak_contrast))) / 28.0
+        clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
+        contrast = clahe.apply(norm)
+
+        progress(56, "progress.photo_scan_faded_threshold")
+        check_cancel()
+        weak_factor = max(0.0, min(1.0, float(weak_contrast) / 100.0))
+        noise_factor = max(0.0, min(1.0, float(noise_suppression) / 100.0))
+        valid_res = residual_dark[alpha]
+        # Bei sehr schwachem Druck niedrigere Schwelle, aber mit zusätzlicher
+        # Kontrastbedingung, damit Papierkorn nicht komplett schwarz wird.
+        res_thr = max(1.2, float(np.percentile(valid_res, 82.0 - weak_factor * 18.0))) if valid_res.size else 3.0
+        contrast_thr = int(max(9, 34 - weak_factor * 20 + noise_factor * 5))
+        block = max(21, int(round(min(h, w) / 16.0)) | 1)
+        block = min(block, 151)
+        local = cv2.adaptiveThreshold(contrast, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block, -2)
+        mask = alpha & (residual_dark >= res_thr) & ((contrast >= contrast_thr) | (local > 0))
+
+        # Gedruckte schwache Linien koennen auch nur als Kante sichtbar sein.
+        edges = cv2.Canny(contrast, 18, 70) > 0
+        mask |= alpha & edges & (residual_abs >= max(1.0, res_thr * 0.55)) & (contrast >= max(7, contrast_thr - 8))
+
+        progress(74, "progress.photo_scan_cleanup")
+        check_cancel()
+        mask_u8 = (mask.astype(np.uint8) * 255)
+        if close_lines:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, k, iterations=1)
+
+        # Bei hohem Rauschen keine grossen Flaechen aggressiv öffnen, sonst gehen
+        # schwache Buchstaben verloren. Nur Einzelkorn etwas beruhigen.
+        if noise_suppression >= 55:
+            k2 = np.ones((2, 2), dtype=np.uint8)
+            opened = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, k2, iterations=1)
+            mask_u8 = np.maximum(opened, (edges.astype(np.uint8) * 255) & mask_u8)
+
+        labels_count, labels, stats, _centroids = cv2.connectedComponentsWithStats((mask_u8 >= 128).astype(np.uint8), connectivity=8)
+        cleaned = np.zeros((h, w), dtype=bool)
+        min_area = max(1, int(min_area))
+        if labels_count > 1:
+            areas = stats[1:, cv2.CC_STAT_AREA].astype(np.int64)
+            widths = stats[1:, cv2.CC_STAT_WIDTH].astype(np.int64)
+            heights = stats[1:, cv2.CC_STAT_HEIGHT].astype(np.int64)
+            spans = np.maximum(widths, heights)
+            mins = np.maximum(1, np.minimum(widths, heights))
+            long_thin = (spans >= max(6, min(h, w) // 200)) & (
+                (mins <= max(4, min(h, w) // 120)) | ((spans / mins.astype(np.float32)) >= 2.0)
+            )
+            keep = np.zeros(labels_count, dtype=bool)
+            keep[1:] = (areas >= min_area) | long_thin
+            cleaned = keep[labels]
+
+        progress(90, "progress.render_preview")
+        out = np.zeros((h, w, 4), dtype=np.uint8)
+        out[:, :, 0:3] = 255
+        out[:, :, 3] = rgba[:, :, 3]
+        out[cleaned, 0:3] = 0
+        result_image = Image.fromarray(out, "RGBA")
+        detected = RecolorApp._detected_colors_from_mask(cleaned, total_valid, (0, 0, 0), (0, 0, 0))
+        if result_image.size != original_size:
+            result_image = result_image.resize(original_size, Image.Resampling.NEAREST)
+            if work_scale > 0:
+                inv_area = 1.0 / max(1e-9, work_scale * work_scale)
+                estimated_total_valid = max(1, int(round(float(total_valid) * inv_area)))
+                for item in detected:
+                    item.pixels = int(round(float(item.pixels) * inv_area))
+                    item.percent = (item.pixels / estimated_total_valid) * 100.0
+        result = PhotoScanCleanupResult(result_image, detected, analysis, "faded", 0.0)
+        result.technical_score = RecolorApp._score_photo_scan_result(image, result, "faded")
+        progress(100, "progress.render_preview")
+        return result
+
+    @staticmethod
+    def build_photo_scan_auto_image(
+        image: Image.Image,
+        preference: str = "auto",
+        max_colors: int = 3,
+        min_area: int = 6,
+        preserve_color_accents: bool = False,
+        max_work_edge: int = 1050,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        cancel_callback: Optional[Callable[[], bool]] = None,
+    ) -> PhotoScanCleanupResult:
+        def progress(value: float, key: str) -> None:
+            if progress_callback is not None:
+                progress_callback(float(value), key)
+
+        def check_cancel() -> None:
+            if cancel_callback is not None and cancel_callback():
+                raise InterruptedError("cancelled")
+
+        max_work_edge = max(480, min(820, int(max_work_edge)))
+        analysis = RecolorApp.analyze_photo_scan_logo_problem(image)
+        preference = (preference or "auto").strip().lower()
+        base_min = max(1, int(min_area))
+        requested_colors = max(1, min(8, int(max_colors)))
+        bw_likely = analysis.color_complexity < 80 or requested_colors <= 2
+        candidates: list[tuple[str, dict[str, object]]] = []
+        if preference == "auto":
+            # Der Auto-Modus darf nicht minutenlang auf 1/5 stehen bleiben.
+            # Deshalb werden nur robuste Universal-Kandidaten getestet;
+            # "Detail" bleibt als eigener manueller Modus verfuegbar.
+            clean_params = dict(max_colors=max(2, min(3, requested_colors)), min_area=max(base_min * 2, 8), noise_suppression=88, foreground_distance=38, weak_contrast=12, protect_background=True, object_mask_first=True, despeckle=True, despeckle_min_area=max(base_min * 2, 8), protect_thin_lines=True, close_lines=True, fill_small_holes=True, preserve_color_accents=preserve_color_accents)
+            balanced_params = dict(max_colors=max(3, requested_colors), min_area=max(base_min * 2, 8), noise_suppression=74, foreground_distance=30, weak_contrast=34, protect_background=True, object_mask_first=True, despeckle=True, despeckle_min_area=max(base_min * 2, 10), protect_thin_lines=True, close_lines=True, fill_small_holes=True, preserve_color_accents=preserve_color_accents)
+            color_params = dict(max_colors=max(4, requested_colors + 1), min_area=max(2, base_min), noise_suppression=55, foreground_distance=24, weak_contrast=45, protect_background=True, object_mask_first=False, despeckle=True, despeckle_min_area=max(base_min, 3), protect_thin_lines=True, close_lines=True, fill_small_holes=False, preserve_color_accents=preserve_color_accents)
+            if bw_likely or requested_colors <= 2:
+                candidates.extend([("bw", {}), ("clean", clean_params)])
+            else:
+                # Schnellere Auto-Suche: robuste Hauptkandidaten testen.
+                # Der farbige Spezialfall bleibt als eigener manueller Modus verfuegbar.
+                candidates.extend([("clean", clean_params), ("balanced", balanced_params), ("bw", {})])
+        else:
+            lookup = {
+                "clean": dict(max_colors=max(2, min(3, requested_colors)), min_area=max(base_min * 2, 8), noise_suppression=88, foreground_distance=38, weak_contrast=12, protect_background=True, object_mask_first=True, despeckle=True, despeckle_min_area=max(base_min * 2, 8), protect_thin_lines=True, close_lines=True, fill_small_holes=True, preserve_color_accents=preserve_color_accents),
+                "detail": dict(max_colors=max(4, requested_colors), min_area=max(1, base_min // 2), noise_suppression=42, foreground_distance=18, weak_contrast=78, protect_background=True, object_mask_first=True, despeckle=False, despeckle_min_area=0, protect_thin_lines=True, close_lines=True, fill_small_holes=False, preserve_color_accents=preserve_color_accents),
+                "color": dict(max_colors=max(4, requested_colors + 1), min_area=max(2, base_min), noise_suppression=55, foreground_distance=24, weak_contrast=45, protect_background=True, object_mask_first=False, despeckle=True, despeckle_min_area=max(base_min, 3), protect_thin_lines=True, close_lines=True, fill_small_holes=False, preserve_color_accents=preserve_color_accents),
+                "bw": {},
+            }
+            candidates.append((preference if preference in lookup else "balanced", lookup.get(preference, dict(max_colors=max(3, requested_colors), min_area=base_min, noise_suppression=68, foreground_distance=28, weak_contrast=40, protect_background=True, object_mask_first=True, despeckle=True, despeckle_min_area=base_min, protect_thin_lines=True, close_lines=True, fill_small_holes=True, preserve_color_accents=preserve_color_accents))))
+
+        results: list[PhotoScanCleanupResult] = []
+        total = max(1, len(candidates))
+        for index, (variant, params) in enumerate(candidates, start=1):
+            check_cancel()
+            start_progress = 8.0 + ((index - 1) / total) * 84.0
+            span_progress = 84.0 / total
+
+            def candidate_progress(inner_value: float, inner_key: str, *, _index: int = index, _variant: str = variant) -> None:
+                value = start_progress + (max(0.0, min(100.0, float(inner_value))) / 100.0) * span_progress
+                progress(value, f"progress.photo_scan_auto_candidate_step|{_index}|{total}|{_variant}|{inner_key}")
+
+            progress(start_progress, f"progress.photo_scan_auto_candidate|{index}|{total}|{variant}")
+            if variant == "bw":
+                result = RecolorApp.build_photo_scan_black_white_image(
+                    image,
+                    min_area=max(1, base_min // 2),
+                    noise_suppression=64,
+                    foreground_distance=24,
+                    weak_contrast=72,
+                    protect_background=True,
+                    protect_thin_lines=True,
+                    close_lines=True,
+                    fill_small_holes=False,
+                    preserve_color_accents=preserve_color_accents,
+                    max_work_edge=max_work_edge,
+                    progress_callback=candidate_progress,
+                    cancel_callback=cancel_callback,
+                )
+            else:
+                result = RecolorApp.build_photo_scan_cleanup_image(
+                    image,
+                    **params,
+                    max_work_edge=max_work_edge,
+                    progress_callback=candidate_progress,
+                    cancel_callback=cancel_callback,
+                )
+                result.variant = variant
+            if variant != "bw":
+                check_cancel()
+                candidate_progress(94, "progress.photo_scan_cleanup")
+                quiet_area = max(base_min, 6) if variant == "detail" else max(base_min * 2, 10)
+                result = RecolorApp._quiet_photo_scan_color_speckles(
+                    result,
+                    min_area=quiet_area,
+                    preserve_thin_lines=True,
+                )
+                check_cancel()
+                solid_area = max(quiet_area * (2 if variant == "detail" else 3), 18)
+                result = RecolorApp._solidify_photo_scan_technical_image(
+                    result,
+                    speckle_area=solid_area,
+                    hole_area=max(solid_area * 5, 90),
+                    preserve_thin_lines=True,
+                )
+            result.technical_score = RecolorApp._score_photo_scan_result(image, result, variant)
+            results.append(result)
+
+        if not results:
+            return RecolorApp.build_photo_scan_cleanup_image(image, max_colors=max_colors, min_area=min_area, max_work_edge=max_work_edge)
+        # Bei Badge-/Logo-Bildern mit kleinen Farbakzenten soll S/W nicht
+        # wieder knapp vom Farbumfaerben verdraengt werden. Sonst werden rote
+        # Sterne/gruene Schrift zwar erkannt, aber als normale Farbe/Schwarz
+        # unbrauchbar dargestellt.
+        color_best = max((r for r in results if r.variant != "bw"), key=lambda r: r.technical_score, default=None)
+        bw_best = max((r for r in results if r.variant == "bw"), key=lambda r: r.technical_score, default=None)
+        best = max(results, key=lambda r: r.technical_score)
+        if (bw_likely or preserve_color_accents) and bw_best is not None and color_best is not None:
+            bw_margin = 14.0 if preserve_color_accents else 5.0
+            if bw_best.technical_score >= color_best.technical_score - bw_margin:
+                best = bw_best
+        elif best.variant == "bw" and color_best is not None and best.technical_score < color_best.technical_score + 7.5:
+            best = color_best
+        progress(100, "progress.render_preview")
+        return best
+
+    @staticmethod
     def build_photo_scan_cleanup_image(
         image: Image.Image,
         max_colors: int = 3,
@@ -1530,11 +2537,14 @@ class RecolorApp(tk.Tk):
         protect_thin_lines: bool = True,
         close_lines: bool = True,
         fill_small_holes: bool = False,
+        preserve_color_accents: bool = False,
         max_work_edge: int = 1500,
         progress_callback: Optional[Callable[[float, str], None]] = None,
         cancel_callback: Optional[Callable[[], bool]] = None,
     ) -> PhotoScanCleanupResult:
-        step_timeout_s = 20.0
+        # Sicherheitsnetz gegen echte Endlosschleifen. Einzelne Schritte dürfen bei
+        # großen Scans aber länger dauern, ohne fälschlich als Abbruch zu wirken.
+        step_timeout_s = 60.0
         total_started = time.perf_counter()
         step_started = total_started
         current_step = "start"
@@ -1624,6 +2634,13 @@ class RecolorApp(tk.Tk):
             return (cleaned.astype(np.uint8) * 255), removed_components, removed_pixels
 
         original_size = image.size
+        # Der farbige Foto-/Scan-Modus ist der teuerste Fall: mehrere Cluster,
+        # Hysterese und Komponentenprüfung. Deshalb hier zusätzlich begrenzen,
+        # auch wenn der Aufrufer versehentlich einen großen Wert übergibt.
+        if int(max_colors) >= 4 or not bool(object_mask_first):
+            max_work_edge = min(int(max_work_edge), 920)
+        else:
+            max_work_edge = min(int(max_work_edge), 1250)
         begin_step(8, "progress.prepare_image", "Bild vorbereiten")
         image, work_scale = RecolorApp._limited_work_image(image, max_edge=max_work_edge)
         rgba = np.array(image.convert("RGBA"), dtype=np.uint8)
@@ -1850,16 +2867,17 @@ class RecolorApp(tk.Tk):
 
         begin_step(62, "progress.photo_scan_cluster", "Farben clustern")
         sample = pixels_lab
-        if sample.shape[0] > 180_000:
-            step = int(math.ceil(sample.shape[0] / 180_000))
+        sample_limit = 28_000 if max_colors >= 4 else 42_000
+        if sample.shape[0] > sample_limit:
+            step = int(math.ceil(sample.shape[0] / float(sample_limit)))
             sample = sample[::step]
         cluster_count = max(1, min(max_colors, int(sample.shape[0])))
         _compactness, _labels_sample, centers = cv2.kmeans(
             sample.astype(np.float32),
             cluster_count,
             None,
-            (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 35, 0.8),
-            3,
+            (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 16, 1.2),
+            1,
             cv2.KMEANS_PP_CENTERS,
         )
         centers = centers.astype(np.float32)
@@ -1885,6 +2903,7 @@ class RecolorApp(tk.Tk):
             flush=True,
         )
         for cluster_index in range(cluster_count):
+            progress(72.0 + (float(cluster_index) / max(1.0, float(cluster_count))) * 16.0, "progress.photo_scan_hysteresis")
             check_step_timeout(f"Cluster {cluster_index + 1}/{cluster_count}")
             dist_to_center = all_dist[:, :, cluster_index]
             secure_distance = float(np.percentile(dist_to_center[foreground & (assigned_cluster == cluster_index)], 68)) if np.any(foreground & (assigned_cluster == cluster_index)) else 0.0
@@ -1918,6 +2937,7 @@ class RecolorApp(tk.Tk):
                 compact_large | line_like | (areas <= max(min_area * 6, int(round(total_valid * 0.004))))
             )
             mask = secure_mask | keep_components_by_stats(labels, stats, criteria, labels_count)
+            progress(72.0 + (float(cluster_index + 1) / max(1.0, float(cluster_count))) * 16.0, "progress.photo_scan_hysteresis")
             print(
                 "[Vektorrazor FotoScan] "
                 f"Maske {cluster_index + 1}/{cluster_count}: Komponenten={labels_count - 1}, "
@@ -2011,16 +3031,36 @@ class RecolorApp(tk.Tk):
             )
 
         result_image = Image.fromarray(out, "RGBA")
-        if result_image.size != original_size:
-            result_image = result_image.resize(original_size, Image.Resampling.NEAREST)
+        result = PhotoScanCleanupResult(result_image, detected, analysis)
+
+        # Wichtig: Diese flächige Nachbereinigung zuerst auf der begrenzten
+        # Arbeitsgröße ausführen. Auf dem Originalscan kann sie bei großen Bildern
+        # sonst bei „Vorschau wird erstellt“ scheinbar hängen bleiben.
+        if despeckle or fill_small_holes or noise_suppression >= 70:
+            progress(92, "progress.photo_scan_cleanup")
+            solid_area = max(
+                int(min_area) * (2 if protect_thin_lines else 3),
+                int(despeckle_min_area) if despeckle else 0,
+                14,
+            )
+            result = RecolorApp._solidify_photo_scan_technical_image(
+                result,
+                speckle_area=solid_area,
+                hole_area=max(solid_area * 5, int(min_area) * 8, 80),
+                preserve_thin_lines=protect_thin_lines,
+            )
+
+        if result.image.size != original_size:
+            result.image = result.image.resize(original_size, Image.Resampling.NEAREST)
             if work_scale > 0:
                 inv_area = 1.0 / max(1e-9, work_scale * work_scale)
-                for item in detected:
+                estimated_total_valid = max(1, int(round(float(total_valid) * inv_area)))
+                for item in result.detected:
                     item.pixels = int(round(float(item.pixels) * inv_area))
-                    item.percent = (item.pixels / max(1, int(np.count_nonzero(np.array(result_image.convert("RGBA"))[:, :, 3] > 0)))) * 100.0
+                    item.percent = (item.pixels / estimated_total_valid) * 100.0
         progress(100, "progress.render_preview")
         print(f"[Vektorrazor FotoScan] Gesamt: {time.perf_counter() - total_started:.2f}s", flush=True)
-        return PhotoScanCleanupResult(result_image, detected, analysis)
+        return result
 
     # ------------------------------------------------------------------ Spezial: Logo-Maske ueber lokalen Kontrast
     def create_logo_mask_preview(self) -> None:
@@ -2121,29 +3161,113 @@ class RecolorApp(tk.Tk):
             else:
                 bg_rgb = np.array(background, dtype=np.float32)
             color_distance = np.linalg.norm(rgb - bg_rgb.reshape(1, 1, 3), axis=2)
-            accent_mask = (
+            raw_accent_mask = (
                 valid
-                & ~mask
                 & (sat >= 0.075)
                 & (color_distance >= 22.0)
                 & (gray <= min(245, int(np.percentile(gray[valid], 96)) if np.any(valid) else 245))
             )
-            if np.any(accent_mask):
-                labels_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
-                    accent_mask.astype(np.uint8),
-                    connectivity=8,
-                )
-                keep = np.zeros_like(accent_mask, dtype=bool)
-                min_area = max(5, int(round(float(valid.sum()) * 0.00001)))
-                for label_id in range(1, labels_count):
-                    area = int(stats[label_id, cv2.CC_STAT_AREA])
-                    width = int(stats[label_id, cv2.CC_STAT_WIDTH])
-                    height = int(stats[label_id, cv2.CC_STAT_HEIGHT])
-                    span = max(width / max(1, w), height / max(1, h))
-                    if area >= min_area or (area >= 3 and span >= 0.025):
-                        keep[labels == label_id] = True
-                if np.any(keep):
-                    out[keep, 0:3] = np.array(accent, dtype=np.uint8)
+            keep = RecolorApp._component_filtered_color_accent_mask(
+                raw_accent_mask,
+                int(np.count_nonzero(valid)),
+                w,
+                h,
+                min_area_ratio=0.000006,
+                max_area_ratio=0.025,
+                max_span_ratio=0.18,
+            )
+            if np.any(keep):
+                out = RecolorApp._apply_local_opposite_to_accent_mask(out, keep, valid)
+        return Image.fromarray(out, "RGBA")
+
+    @staticmethod
+    def build_logo_direct_black_image(
+        image: Image.Image,
+        threshold: int,
+        foreground: RGB,
+        background: RGB,
+        clean: bool = False,
+        preserve_color_accents: bool = False,
+        accent: RGB = (128, 64, 0),
+    ) -> Image.Image:
+        """Setzt eine dominante Motivfarbe technisch auf Schwarz um.
+
+        Dieser Weg ist für saubere Logos mit einer klaren dunklen Motivfarbe
+        gedacht, bei denen die lokale Logo-Maske unnötig aggressiv wäre.
+        Im Unterschied zur Logo-Maske wird hier keine lokale Hintergrundschätzung
+        mit großem Blur benutzt, sondern ein direkter Farb-/Helligkeitsabstand
+        zum geschätzten Hintergrund ausgewertet. So bleiben feine Innenlinien
+        oft besser erhalten.
+        """
+        rgba = np.array(image.convert("RGBA"), dtype=np.uint8)
+        rgb = rgba[:, :, :3].astype(np.float32)
+        alpha = rgba[:, :, 3] > 0
+        if not np.any(alpha):
+            return image.convert("RGBA")
+
+        h, w = alpha.shape
+        gray = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+
+        border = max(1, int(round(min(h, w) * 0.03)))
+        border_mask = np.zeros((h, w), dtype=bool)
+        border_mask[:border, :] = True
+        border_mask[-border:, :] = True
+        border_mask[:, :border] = True
+        border_mask[:, -border:] = True
+        bg_candidates = border_mask & alpha
+        if int(np.count_nonzero(bg_candidates)) < max(20, (h * w) // 200):
+            bright = gray >= np.percentile(gray[alpha], 65)
+            bg_candidates = alpha & bright
+        if not np.any(bg_candidates):
+            bg_candidates = alpha
+
+        bg_rgb = np.median(rgb[bg_candidates], axis=0)
+        bg_gray = float(0.299 * bg_rgb[0] + 0.587 * bg_rgb[1] + 0.114 * bg_rgb[2])
+        color_distance = np.linalg.norm(rgb - bg_rgb.reshape(1, 1, 3), axis=2)
+        darker = np.maximum(0.0, bg_gray - gray)
+
+        sensitivity = max(1, min(100, int(threshold)))
+        tone_threshold = float(np.interp(sensitivity, [1, 100], [5.0, 42.0]))
+        color_threshold = float(np.interp(sensitivity, [1, 100], [10.0, 62.0]))
+
+        mask = alpha & (
+            ((darker >= tone_threshold) & (color_distance >= color_threshold * 0.55))
+            | (darker >= tone_threshold * 1.55)
+            | (color_distance >= color_threshold * 1.20)
+        )
+
+        if clean:
+            mask_img = Image.fromarray((mask.astype(np.uint8) * 255), "L")
+            mask_img = mask_img.filter(ImageFilter.MedianFilter(size=3))
+            mask = np.array(mask_img, dtype=np.uint8) >= 128
+
+        out = np.zeros((h, w, 4), dtype=np.uint8)
+        out[:, :, 0:3] = np.array(background, dtype=np.uint8)
+        out[:, :, 3] = 255
+        out[mask, 0:3] = np.array(foreground, dtype=np.uint8)
+
+        if preserve_color_accents:
+            valid = alpha > 0
+            rgb_norm = np.clip(rgb / 255.0, 0.0, 1.0)
+            sat = np.max(rgb_norm, axis=2) - np.min(rgb_norm, axis=2)
+            color_distance_full = np.linalg.norm(rgb - bg_rgb.reshape(1, 1, 3), axis=2)
+            raw_accent_mask = (
+                valid
+                & (sat >= 0.075)
+                & (color_distance_full >= 22.0)
+                & (gray <= min(245, int(np.percentile(gray[valid], 96)) if np.any(valid) else 245))
+            )
+            keep = RecolorApp._component_filtered_color_accent_mask(
+                raw_accent_mask,
+                int(np.count_nonzero(valid)),
+                w,
+                h,
+                min_area_ratio=0.000006,
+                max_area_ratio=0.025,
+                max_span_ratio=0.18,
+            )
+            if np.any(keep):
+                out = RecolorApp._apply_local_opposite_to_accent_mask(out, keep, valid)
         return Image.fromarray(out, "RGBA")
 
     # ------------------------------------------------------------------ Erweiterter Modus

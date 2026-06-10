@@ -6,12 +6,33 @@
 """
 Workflow-App für PNG-Aufbereitung und Vektorisierung.
 
+Diese Datei bildet die zentrale Schaltstelle des Programms. Hier werden
+Benutzeroberfläche, Schrittlogik, automatische Empfehlungen, Bildvorschau,
+Zwischenergebnisse und der Übergang zur eigentlichen Vektorisierung
+koordiniert.
+
+Hauptaufgaben dieser Datei:
+- Aufbau und Verwaltung der zweistufigen Workflow-Oberfläche
+- Laden, Zurücksetzen und Vorbereiten von Eingabebildern
+- automatische Modus-Empfehlung für Schritt 1
+- Steuerung der Spezialmodi wie Logo-Maske und Foto-Scan
+- Übergabe des technisch bereinigten Bildes an Schritt 2
+- Verwaltung von Statusmeldungen, Busy-Dialogen und Fortschritt
+
 Datei-Struktur:
-- main.py             -> Startdatei
-- workflow_app.py     -> Haupt-Workflow-Oberfläche
-- recolor_engine.py   -> Bildvorbereitung / Umfärben / PNG-Export
-- vector_engine.py    -> Vektorisierung / SVG / DXF
-- requirements.txt    -> Python-Abhängigkeiten
+- main.py               -> Programmeinstieg
+- workflow_app.py       -> zentrale Ablaufsteuerung
+- recolor_engine.py     -> Bildvorbereitung, Umfärbung, technische S/W-Erzeugung
+- vector_engine.py      -> Konturerkennung, Reduktion, SVG/DXF/STL-nahe Ausgaben
+- ui_step1.py           -> UI-Bausteine für Schritt 1
+- ui_step2.py           -> UI-Bausteine für Schritt 2
+- dialogs_scale_export.py -> ausgelagerte Dialoge für Export und Skalierung
+- i18n.py               -> Sprachumschaltung und Textauflösung
+
+Wichtige Grundidee:
+Schritt 1 soll aus einem oft ungeeigneten PNG eine technisch saubere Grundlage
+machen. Erst danach soll Schritt 2 die Konturen vektorisieren. Dadurch bleiben
+beide Aufgaben klar getrennt: zuerst Bildbereinigung, danach Geometrie.
 """
 
 from __future__ import annotations
@@ -48,6 +69,11 @@ def resource_path(relative_path: str) -> Path:
 
 
 RGB = Tuple[int, int, int]
+
+ACTION_GREEN = "#15803d"
+ACTION_GREEN_ACTIVE = "#166534"
+ACTION_YELLOW = "#ca8a04"
+ACTION_YELLOW_ACTIVE = "#a16207"
 
 
 class HoverTooltip:
@@ -210,6 +236,25 @@ def _known_color_name(rgb: RGB) -> str:
     return names.get(tuple(rgb), f"RGB_{rgb[0]}_{rgb[1]}_{rgb[2]}")
 
 
+def _row_action_button(parent: tk.Widget, text: str, command, *, bg: str, activebackground: str) -> tk.Button:
+    return tk.Button(
+        parent,
+        text=text,
+        command=command,
+        bg=bg,
+        fg="white",
+        activebackground=activebackground,
+        activeforeground="white",
+        relief="raised",
+        bd=1,
+        width=7,
+        padx=4,
+        pady=2,
+        font=("Segoe UI", 8, "bold"),
+        cursor="hand2",
+    )
+
+
 class BasicWorkflowRow:
     def __init__(self, app: "WorkflowApp", parent: tk.Widget, index: int, detected: Any) -> None:
         self.app = app
@@ -232,7 +277,7 @@ class BasicWorkflowRow:
         self.target_entry.grid(row=0, column=6, sticky="w")
         self.target_swatch = tk.Label(self.frame, width=3, relief="solid", bd=1)
         self.target_swatch.grid(row=0, column=7, padx=(4, 4))
-        ttk.Button(self.frame, text="wählen", width=7, command=self.choose_target_color).grid(row=0, column=8, sticky="w")
+        _row_action_button(self.frame, tr("button.choose"), self.choose_target_color, bg=ACTION_GREEN, activebackground=ACTION_GREEN_ACTIVE).grid(row=0, column=8, sticky="w")
 
         self.target_var.trace_add("write", lambda *_: self._on_change())
         self.enabled_var.trace_add("write", lambda *_: self.app.schedule_step1_preview())
@@ -296,23 +341,14 @@ class ManualWorkflowRow:
         ttk.Entry(self.frame, textvariable=self.source_var, width=13).grid(row=0, column=3, sticky="w")
         self.source_swatch = tk.Label(self.frame, width=3, relief="solid", bd=1)
         self.source_swatch.grid(row=0, column=4, padx=(4, 4))
-        ttk.Button(self.frame, text=tr("button.choose"), width=7, command=self.choose_source_color).grid(row=0, column=5, sticky="w", padx=(0, 8))
+        _row_action_button(self.frame, tr("button.choose"), self.choose_source_color, bg=ACTION_YELLOW, activebackground=ACTION_YELLOW_ACTIVE).grid(row=0, column=5, sticky="w", padx=(0, 8))
         ttk.Label(self.frame, text="Tol.").grid(row=0, column=6, sticky="w")
         ttk.Entry(self.frame, textvariable=self.tolerance_var, width=5).grid(row=0, column=7, sticky="w", padx=(2, 8))
-        ttk.Label(self.frame, text="→").grid(row=0, column=7)
+        ttk.Label(self.frame, text="→").grid(row=0, column=8, padx=2)
         ttk.Entry(self.frame, textvariable=self.target_var, width=13).grid(row=0, column=9, sticky="w", padx=(4, 0))
         self.target_swatch = tk.Label(self.frame, width=3, relief="solid", bd=1)
         self.target_swatch.grid(row=0, column=10, padx=(4, 4))
-        ttk.Button(self.frame, text="wählen", width=7, command=self.choose_target_color).grid(row=0, column=10, sticky="w")
-
-        for widget in self.frame.grid_slaves(row=0, column=7):
-            if isinstance(widget, ttk.Label):
-                widget.configure(text="->")
-                widget.grid(row=0, column=8)
-        for widget in self.frame.grid_slaves(row=0, column=10):
-            if isinstance(widget, ttk.Button):
-                widget.configure(text=tr("button.choose"))
-                widget.grid(row=0, column=11, sticky="w")
+        _row_action_button(self.frame, tr("button.choose"), self.choose_target_color, bg=ACTION_GREEN, activebackground=ACTION_GREEN_ACTIVE).grid(row=0, column=11, sticky="w")
 
         for var in (self.source_var, self.tolerance_var, self.target_var):
             var.trace_add("write", lambda *_: self._on_change())
@@ -381,7 +417,7 @@ class WorkflowApp(tk.Tk):
 
         self._config_loading = True
         self.user_config_dir = self._program_dir() / "vektorrazor_config"
-        self.user_config_file = self.user_config_dir / "config.json"
+        self.user_config_file = self.user_config_dir / "settings.json"
         self.scale_export_config_file = self.user_config_dir / "scale_export.json"
         self.user_config = self._load_user_config()
 
@@ -446,7 +482,14 @@ class WorkflowApp(tk.Tk):
         self.photo_scan_protect_thin_lines_var = tk.BooleanVar(value=True)
         self.photo_scan_close_lines_var = tk.BooleanVar(value=True)
         self.photo_scan_fill_small_holes_var = tk.BooleanVar(value=False)
+        self.photo_scan_preserve_accents_var = tk.BooleanVar(value=True)
+        self.photo_scan_mode_var = tk.StringVar(value="auto")
         self.photo_scan_status_var = tk.StringVar(value="")
+        self.eraser_size_var = tk.IntVar(value=20)
+        self.eraser_shape_var = tk.StringVar(value="round")
+        self.eraser_color_var = tk.StringVar(value="255,255,255")
+        self.eraser_status_var = tk.StringVar(value=tr("step1.eraser_status_idle"))
+        self._eraser_last_xy: Optional[Tuple[int, int]] = None
 
         # Schritt 2 Variablen
         self.vector_image_rgb: Optional[np.ndarray] = None
@@ -551,9 +594,16 @@ class WorkflowApp(tk.Tk):
 
     def _default_user_config(self) -> dict[str, Any]:
         return {
+            "app": {
+                "settings_version": 2,
+                "language_files_dir": "lang",
+            },
             "ui": {
+                "language": i18n.FALLBACK_LANGUAGE,
                 "dark_mode": False,
                 "theme": "classic",
+                "complexity": "simple",
+                "motif_profile": "mixed",
             },
             "paths": {
                 "last_input_dir": "",
@@ -564,6 +614,7 @@ class WorkflowApp(tk.Tk):
             "export": {
                 "dxf_compatibility": "default",
                 "dxf_version": "R2000",
+                "live_preview": True,
             },
         }
 
@@ -575,28 +626,55 @@ class WorkflowApp(tk.Tk):
                 defaults.update({key: value for key, value in incoming.items() if key in defaults})
         return merged
 
+    def _legacy_user_config_files(self) -> list[Path]:
+        # Früher wurde die Hauptkonfiguration als config.json gespeichert.
+        # Beim ersten Start mit der neuen Version wird sie automatisch übernommen.
+        return [self.user_config_dir / "config.json"]
+
+    def _load_json_file(self, path: Path) -> dict[str, Any] | None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
     def _load_user_config(self) -> dict[str, Any]:
         try:
             self.user_config_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
-        if not self.user_config_file.exists():
-            config = self._default_user_config()
+        if self.user_config_file.exists():
+            data = self._load_json_file(self.user_config_file)
+            if data is not None:
+                return self._merge_config_defaults(data)
+            return self._default_user_config()
+
+        for legacy_file in self._legacy_user_config_files():
+            if not legacy_file.exists():
+                continue
+            data = self._load_json_file(legacy_file)
+            if data is None:
+                continue
+            config = self._merge_config_defaults(data)
             self._write_user_config(config)
             return config
-        try:
-            data = json.loads(self.user_config_file.read_text(encoding="utf-8"))
-            return self._merge_config_defaults(data if isinstance(data, dict) else {})
-        except Exception:
-            return self._default_user_config()
+
+        config = self._default_user_config()
+        self._write_user_config(config)
+        return config
+
+    def _write_json_atomic(self, path: Path, data: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(f".{path.name}.tmp")
+        tmp_path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        tmp_path.replace(path)
 
     def _write_user_config(self, config: dict[str, Any]) -> None:
         try:
-            self.user_config_dir.mkdir(parents=True, exist_ok=True)
-            self.user_config_file.write_text(
-                json.dumps(config, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            self._write_json_atomic(self.user_config_file, config)
         except Exception:
             pass
 
@@ -630,34 +708,44 @@ class WorkflowApp(tk.Tk):
 
     def _save_scale_export_config(self, config: dict[str, Any]) -> None:
         try:
-            self.user_config_dir.mkdir(parents=True, exist_ok=True)
             merged = self._default_scale_export_config()
             for key in merged:
                 if key in config:
                     merged[key] = config[key]
-            self.scale_export_config_file.write_text(
-                json.dumps(merged, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            self._write_json_atomic(self.scale_export_config_file, merged)
         except Exception:
             pass
 
     def _apply_user_config_to_vars(self) -> None:
         ui_config = self.user_config.get("ui", {})
         export_config = self.user_config.get("export", {})
+
+        language = str(ui_config.get("language", i18n.FALLBACK_LANGUAGE))
+        if not i18n.set_language(language):
+            i18n.set_language(i18n.FALLBACK_LANGUAGE)
+        self.title(tr("app.title"))
+
         self.dark_mode_var.set(bool(ui_config.get("dark_mode", False)))
         theme_key = str(ui_config.get("theme", "classic"))
         self.ui_theme_key_var.set(theme_key if theme_key in UI_THEME_KEYS else "classic")
+        complexity_key = str(ui_config.get("complexity", "simple"))
+        self.ui_complexity_var.set(complexity_key if complexity_key in UI_COMPLEXITY_KEYS else "simple")
+        motif_key = str(ui_config.get("motif_profile", "mixed"))
+        self.motif_profile_var.set(motif_key if motif_key in MOTIF_PROFILE_KEYS else "mixed")
 
         profile = str(export_config.get("dxf_compatibility", "default"))
         self.dxf_compatibility_var.set(profile if profile in DXF_COMPATIBILITY_KEYS else "default")
         version = str(export_config.get("dxf_version", "R2000"))
         self.dxf_version_var.set(_dxf_choice_for_version(version))
+        self.live_preview_var.set(bool(export_config.get("live_preview", True)))
 
     def _bind_user_config_traces(self) -> None:
         for var in (
             self.dark_mode_var,
             self.ui_theme_key_var,
+            self.ui_complexity_var,
+            self.motif_profile_var,
+            self.live_preview_var,
             self.dxf_compatibility_var,
             self.dxf_version_var,
             self.output_path_var,
@@ -672,13 +760,21 @@ class WorkflowApp(tk.Tk):
         if getattr(self, "_config_loading", False):
             return
         config = self._merge_config_defaults(getattr(self, "user_config", {}))
+        language = i18n.current_language()
+        available_language_codes = {code for code, _name in i18n.available_languages()}
+        config["ui"]["language"] = language if language in available_language_codes else i18n.FALLBACK_LANGUAGE
         config["ui"]["dark_mode"] = bool(self.dark_mode_var.get())
         theme_key = self.ui_theme_key_var.get()
         config["ui"]["theme"] = theme_key if theme_key in UI_THEME_KEYS else "classic"
+        complexity_key = self.ui_complexity_var.get()
+        config["ui"]["complexity"] = complexity_key if complexity_key in UI_COMPLEXITY_KEYS else "simple"
+        motif_key = self.motif_profile_var.get()
+        config["ui"]["motif_profile"] = motif_key if motif_key in MOTIF_PROFILE_KEYS else "mixed"
 
         profile = self.dxf_compatibility_var.get()
         config["export"]["dxf_compatibility"] = profile if profile in DXF_COMPATIBILITY_KEYS else "default"
         config["export"]["dxf_version"] = self.get_selected_dxf_version()
+        config["export"]["live_preview"] = bool(self.live_preview_var.get())
 
         input_path = self.input_path_var.get().strip()
         if input_path:
@@ -745,6 +841,9 @@ class WorkflowApp(tk.Tk):
             self.preview_mode_var,
             self.use_bezier_var,
             self.unique_cad_lines_var,
+            self.duplicate_line_tolerance_var,
+            self.remove_loose_points_var,
+            self.anchor_neighbor_distance_var,
             self.smooth_contours_var,
             self.smooth_strength_var,
             self.preprocess_vector_var,
@@ -799,6 +898,25 @@ class WorkflowApp(tk.Tk):
     def _motif_profile_label(self, key: str) -> str:
         return tr(f"motif_profile.{key}")
 
+    def _step1_mode_label(self, key: str) -> str:
+        return tr(f"step1.mode.{key}")
+
+    def _step1_mode_hint(self, key: str) -> str:
+        return tr(f"step1.mode_hint.{key}")
+
+    def _refresh_step1_mode_selector(self) -> None:
+        if not hasattr(self, "step1_mode_box"):
+            return
+        keys = list(getattr(self, "step1_mode_keys", ["prep", "basic", "manual", "eraser", "logo", "photo_scan"]))
+        labels = [self._step1_mode_label(key) for key in keys]
+        self.step1_mode_display_to_key = dict(zip(labels, keys))
+        self.step1_mode_box.configure(values=labels)
+        key = self.step1_tab_key_var.get() if hasattr(self, "step1_tab_key_var") else "prep"
+        if key not in keys:
+            key = "prep"
+        self.step1_tab_display_var.set(self._step1_mode_label(key))
+        self.step1_tab_hint_var.set(self._step1_mode_hint(key))
+
     def _refresh_combobox_labels(self) -> None:
         if hasattr(self, "language_box"):
             languages = i18n.available_languages()
@@ -808,6 +926,8 @@ class WorkflowApp(tk.Tk):
                 if code == current:
                     self.language_var.set(name)
                     break
+
+        self._refresh_step1_mode_selector()
 
         if hasattr(self, "compat_box"):
             self.compat_box.configure(values=[self._compat_label(key) for key in DXF_COMPATIBILITY_KEYS])
@@ -860,7 +980,9 @@ class WorkflowApp(tk.Tk):
             "PNG speichern": "step1.save_png",
             "Workflow / Abschluss Schritt 1": "step1.actions",
             "Weiter zur Vektorisierung →": "nav.next_vectorize",
-            "Zwischenbild nur aktualisieren": "step1.update_intermediate",
+            "Zwischenbild nur aktualisieren": "step1.use_preview_as_base",
+            "Für Vektorisierung übernehmen": "step1.use_preview_as_base",
+            "Aktuelle Vorschau als neue Grundlage": "step1.use_preview_as_base",
             "Hinweis: 'Weiter zur Vektorisierung' übernimmt das bearbeitete Bild automatisch. Der Aktualisieren-Button ist nur optional.": "step1.update_hint",
             "1) Bildvorbereitung": "step1.prep",
             "Helligkeit": "step1.brightness",
@@ -1033,6 +1155,8 @@ class WorkflowApp(tk.Tk):
                 walk(child)
 
         walk(self)
+        if hasattr(self, "prep_tab"):
+            self._register_notebook_tab(self.step1_notebook, self.prep_tab, "step1.tab_preprocess")
         self._register_notebook_tab(self.step1_notebook, self.basic_tab, "step1.tab_basic")
         self._register_notebook_tab(self.step1_notebook, self.manual_tab, "step1.tab_manual")
         self._register_notebook_tab(self.step1_notebook, self.logo_tab, "step1.tab_logo")
@@ -1044,6 +1168,7 @@ class WorkflowApp(tk.Tk):
         if not code or not i18n.set_language(code):
             return
         self.refresh_ui_texts()
+        self._save_user_config()
         message = i18n.language_status_message() or tr("status.language_changed")
         self.status_var.set(message)
 
@@ -1107,15 +1232,13 @@ class WorkflowApp(tk.Tk):
         self.language_box = ttk.Combobox(header, textvariable=self.language_var, state="readonly", width=20)
         self.language_box.grid(row=0, column=2, sticky="e", padx=(8, 10))
         self.language_box.bind("<<ComboboxSelected>>", self.on_language_changed)
-        self.ui_theme_box = ttk.Combobox(header, textvariable=self.ui_theme_display_var, state="readonly", width=12)
-        self.ui_theme_box.grid(row=0, column=3, sticky="e", padx=(0, 6))
-        self.ui_theme_box.bind("<<ComboboxSelected>>", lambda _event: self.on_ui_theme_display_changed())
+        # Layout-Design-Auswahl entfernt: Vektorrazor nutzt ein einheitliches Layout.
         # Einfach/Experte wird bewusst nicht mehr im Header angezeigt.
         # Die Umschaltung sitzt jetzt direkt links oben in den Vektor-Optionen.
         self.ui_complexity_box = ttk.Combobox(header, textvariable=self.ui_complexity_display_var, state="readonly", width=12)
         self.ui_complexity_box.bind("<<ComboboxSelected>>", lambda _event: self.on_ui_complexity_display_changed())
         self.dark_toggle = ttk.Checkbutton(header, text=tr("ui.dark_mode"), variable=self.dark_mode_var, command=self.apply_ui_theme)
-        self.dark_toggle.grid(row=0, column=4, sticky="e", padx=(0, 8))
+        self.dark_toggle.grid(row=0, column=3, sticky="e", padx=(0, 8))
         # Navigation bewusst als große, farbige Buttons:
         # Man sieht sofort, was der nächste Workflow-Schritt ist.
         self.back_btn = tk.Button(
@@ -1203,11 +1326,15 @@ class WorkflowApp(tk.Tk):
     def _build_step1_manual_tab(self) -> None:
         return ui_step1._build_step1_manual_tab(self)
 
+    def _build_step1_eraser_tab(self) -> None:
+        return ui_step1._build_step1_eraser_tab(self)
+
     def _build_step1_logo_tab(self) -> None:
         return ui_step1._build_step1_logo_tab(self)
 
     def _build_step1_photo_scan_tab(self) -> None:
         return ui_step1._build_step1_photo_scan_tab(self)
+
 
     def _build_step2(self) -> None:
         return ui_step2._build_step2(self)
@@ -1547,26 +1674,47 @@ class WorkflowApp(tk.Tk):
                 return
         self.step2_zoom_preset_var.set(f"{float(zoom) * 100:.0f}%")
 
-    def on_step2_zoom_spin_changed(self) -> None:
+    def set_step2_zoom_percent(self, percent: float) -> None:
+        # Zentrale Zoom-Setzung für Schritt 2. Alle Bedienwege landen hier,
+        # damit Prozentfeld, interne Zoomvariable und beide Vorschauflächen synchron bleiben.
         try:
-            zoom = float(str(self.step2_zoom_percent_var.get()).replace(",", ".")) / 100.0
+            value = float(percent)
         except Exception:
             return
-        zoom = max(0.25, min(8.0, zoom))
-        self.step2_zoom_percent_var.set(str(int(round(zoom * 100))))
+        value = max(25.0, min(800.0, value))
+        # Feste 5-Prozent-Schritte vermeiden unnötig viele Zwischen-Renderings.
+        value = round(value / 5.0) * 5.0
+        zoom = value / 100.0
+        self.step2_zoom_percent_var.set(str(int(round(value))))
         self.step2_shared_zoom_var.set(round(zoom, 2))
         self.on_step2_shared_zoom_changed(str(zoom))
+
+    def step2_zoom_step(self, delta_percent: float) -> None:
+        # Plus/Minus-Zoom in festen 5-%-Schritten. Das ist absichtlich grober
+        # als Mausrad oder Slider und verhindert Render-Stürme bei großen Bildern.
+        try:
+            current = float(str(self.step2_zoom_percent_var.get()).replace(",", "."))
+        except Exception:
+            try:
+                current = float(self.step2_shared_zoom_var.get()) * 100.0
+            except Exception:
+                current = 100.0
+        self.set_step2_zoom_percent(current + float(delta_percent))
+
+    def on_step2_zoom_spin_changed(self) -> None:
+        try:
+            percent = float(str(self.step2_zoom_percent_var.get()).replace(",", "."))
+        except Exception:
+            return
+        self.set_step2_zoom_percent(percent)
 
     def on_step2_zoom_preset_changed(self) -> None:
         text = str(self.step2_zoom_preset_var.get()).strip().replace("%", "")
         try:
-            zoom = float(text.replace(",", ".")) / 100.0
+            percent = float(text.replace(",", "."))
         except Exception:
             return
-        zoom = max(0.25, min(8.0, zoom))
-        self.step2_zoom_percent_var.set(str(int(round(zoom * 100))))
-        self.step2_shared_zoom_var.set(round(zoom, 2))
-        self.on_step2_shared_zoom_changed(str(zoom))
+        self.set_step2_zoom_percent(percent)
 
     def on_step2_shared_zoom_changed(self, value: str) -> None:
         if self._syncing_step2_zoom:
@@ -1593,9 +1741,7 @@ class WorkflowApp(tk.Tk):
             rounded_zoom = round(float(zoom), 2)
             self.step2_shared_zoom_var.set(rounded_zoom)
             self._update_step2_zoom_preset_display(rounded_zoom)
-            if hasattr(self, "step2_zoom_scale"):
-                self.step2_zoom_scale.update_idletasks()
-            # Beide Vorschauen synchron halten, wenn per Mausrad in einem Canvas gezoomt wird.
+            # Beide Vorschauen synchron halten, falls ein Canvas-Zoom extern gesetzt wird.
             if hasattr(self, "step2_original_canvas"):
                 self.step2_original_canvas.set_zoom(rounded_zoom)
             if hasattr(self, "step2_vector_canvas"):
@@ -1724,6 +1870,7 @@ class WorkflowApp(tk.Tk):
 
     def on_anchor_cleanup_toggle(self) -> None:
         self._refresh_anchor_cleanup_controls()
+        self._update_cad_point_count()
         self._schedule_live_preview_if_enabled()
 
     def _apply_step1_scale_theme(self, base: str, text: str, dark: bool) -> None:
@@ -1786,6 +1933,13 @@ class WorkflowApp(tk.Tk):
         self.style.configure("TNotebook", background=base)
         self.style.configure("TNotebook.Tab", background=panel, foreground=text, padding=(10, 4))
         self.style.map("TNotebook.Tab", background=[("selected", base)])
+        try:
+            self.style.layout("Step1Hidden.TNotebook", [("Notebook.client", {"sticky": "nswe"})])
+            self.style.layout("Step1Hidden.TNotebook.Tab", [])
+            self.style.configure("Step1Hidden.TNotebook", background=base, borderwidth=0, tabmargins=(0, 0, 0, 0), padding=0)
+            self.style.configure("Step1Hidden.TNotebook.Tab", padding=0)
+        except Exception:
+            pass
         self.style.configure("TEntry", fieldbackground=panel, foreground=text)
         self.style.configure("TSpinbox", fieldbackground=panel, foreground=text)
         self.style.configure("TButton", background=panel, foreground=text, padding=(8, 3))
@@ -1837,7 +1991,21 @@ class WorkflowApp(tk.Tk):
             show_top_toolbar = False
         self.back_btn.configure(bg=back_bg, activebackground=back_bg, fg="white", activeforeground="white", relief=btn_relief, bd=btn_bd, padx=btn_padx, pady=btn_pady)
         self.next_btn.configure(bg=next_bg, activebackground=next_bg, fg="white", activeforeground="white", relief=btn_relief, bd=btn_bd, padx=btn_padx, pady=btn_pady)
-        self.step1_next_action_btn.configure(bg=step_bg, activebackground=step_bg, fg="white", activeforeground="white", relief=btn_relief, bd=btn_bd, padx=btn_padx, pady=btn_pady, font=compact_font)
+        # Schritt-1-Abschluss bewusst grün halten: die Theme-Logik darf diesen Button
+        # nicht wieder blau/grau überschreiben.
+        self.step1_next_action_btn.configure(
+            bg=ACTION_GREEN,
+            activebackground=ACTION_GREEN_ACTIVE,
+            fg="white",
+            activeforeground="white",
+            relief=btn_relief,
+            bd=btn_bd,
+            # Unten in Schritt 1 soll dieser Button exakt so groß wirken wie die drei Nachbarbuttons.
+            # Deshalb hier bewusst NICHT die kompaktere Theme-Padding-Variante verwenden.
+            padx=14,
+            pady=6,
+            font=("Segoe UI", 9, "bold"),
+        )
         if hasattr(self, "step2_quick_preview_btn"):
             try:
                 self.step2_quick_preview_btn.configure(
@@ -1851,6 +2019,8 @@ class WorkflowApp(tk.Tk):
                 pass
         if hasattr(self, "detect_action_btn"):
             self.detect_action_btn.configure(activeforeground="white")
+        if hasattr(self, "cad_cleanup_action_btn"):
+            self.cad_cleanup_action_btn.configure(activeforeground="white")
         if hasattr(self, "export_action_btn"):
             self.export_action_btn.configure(activeforeground="white")
         if hasattr(self, "scale_export_action_btn"):
@@ -2026,6 +2196,8 @@ class WorkflowApp(tk.Tk):
             self.problem_hint_frame.grid_remove()
 
     def open_manual_colors_from_hint(self) -> None:
+        # Wenn keine der automatischen Heuristiken sauber greift, bleibt als
+        # sichere Fallback-Empfehlung die manuelle Bearbeitung.
         try:
             self.step1_notebook.select(self.manual_tab)
         except Exception:
@@ -2057,7 +2229,42 @@ class WorkflowApp(tk.Tk):
                 self._busy_status_var.set(text)
         if self._busy_progress_var is not None:
             self._busy_progress_var.set(value)
+        self._resize_busy_dialog_to_content()
         self.update_idletasks()
+
+    def _busy_dialog_geometry(self, requested_height: int) -> tuple[int, int, int, int]:
+        """Konstante, breite Fortschrittsfenster-Geometrie ohne abgeschnittenen Text."""
+        try:
+            screen_width = max(640, int(self.winfo_screenwidth()))
+            screen_height = max(480, int(self.winfo_screenheight()))
+            app_width = max(640, int(self.winfo_width()))
+            width = min(max(620, min(700, app_width - 120)), screen_width - 80)
+            height = min(max(105, int(requested_height)), screen_height - 120)
+            x = int(self.winfo_rootx() + max(40, (app_width - width) // 2))
+            y = int(self.winfo_rooty() + max(60, (int(self.winfo_height()) - height) // 2))
+            x = max(20, min(x, screen_width - width - 20))
+            y = max(20, min(y, screen_height - height - 40))
+            return width, height, x, y
+        except Exception:
+            return 640, max(120, int(requested_height)), 120, 120
+
+    def _resize_busy_dialog_to_content(self) -> None:
+        dialog = getattr(self, "_busy_dialog", None)
+        if dialog is None:
+            return
+        try:
+            width = int(getattr(self, "_busy_dialog_width", 640))
+            dialog.update_idletasks()
+            requested_height = int(dialog.winfo_reqheight()) + 2
+            max_height = max(220, int(dialog.winfo_screenheight() * 0.55))
+            height = min(max(105, requested_height), max_height)
+            # X/Y beibehalten, damit das Fenster nicht springt. Nur Breite/Hoehe werden stabilisiert.
+            x = max(20, int(dialog.winfo_x()))
+            y = max(20, int(dialog.winfo_y()))
+            dialog.geometry(f"{width}x{height}+{x}+{y}")
+            dialog.minsize(width, height)
+        except Exception:
+            pass
 
     def show_busy_dialog(self, title: str = "Bitte warten", message: str = "Bild wird analysiert...", cancellable: bool = False) -> None:
         """Blockiert kurz die Oberfläche, damit man während Auto-Analyse nicht versehentlich klickt."""
@@ -2075,20 +2282,28 @@ class WorkflowApp(tk.Tk):
             dialog.transient(self)
             dialog.resizable(False, False)
             dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+            dialog.columnconfigure(0, weight=1)
+            dialog.rowconfigure(0, weight=1)
             self._busy_progress_var = tk.DoubleVar(value=float(self.progress_var.get()))
             self._busy_status_var = tk.StringVar(value=self._format_progress_status(float(self.progress_var.get()), message))
-            frame = ttk.Frame(dialog, padding=(18, 14, 18, 14))
+            frame = ttk.Frame(dialog, padding=(18, 12, 18, 12))
             frame.grid(row=0, column=0, sticky="nsew")
-            ttk.Label(frame, textvariable=self._busy_status_var, justify="left", wraplength=420).grid(row=0, column=0, sticky="w")
-            bar = ttk.Progressbar(frame, mode="determinate", variable=self._busy_progress_var, maximum=100, length=360)
-            bar.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+            frame.columnconfigure(0, weight=1)
+            width, _height, x, y = self._busy_dialog_geometry(130 if not cancellable else 165)
+            self._busy_dialog_width = width
+            wrap = max(460, width - 76)
+            ttk.Label(frame, textvariable=self._busy_status_var, justify="left", wraplength=wrap).grid(row=0, column=0, sticky="ew")
+            bar = ttk.Progressbar(frame, mode="determinate", variable=self._busy_progress_var, maximum=100, length=max(420, width - 90))
+            bar.grid(row=1, column=0, sticky="ew", pady=(10, 0))
             if cancellable:
-                ttk.Button(frame, text=tr("button.cancel"), command=self.request_busy_cancel).grid(row=2, column=0, sticky="e", pady=(12, 0))
+                ttk.Button(frame, text=tr("button.cancel"), command=self.request_busy_cancel).grid(row=2, column=0, sticky="e", pady=(10, 0))
             self.update_idletasks()
-            x = self.winfo_rootx() + max(80, (self.winfo_width() - 430) // 2)
-            height = 165 if cancellable else 120
-            y = self.winfo_rooty() + max(80, (self.winfo_height() - height) // 2)
-            dialog.geometry(f"430x{height}+{x}+{y}")
+            dialog.update_idletasks()
+            requested_height = int(dialog.winfo_reqheight()) + 2
+            width, height, x, y = self._busy_dialog_geometry(requested_height)
+            self._busy_dialog_width = width
+            dialog.geometry(f"{width}x{height}+{x}+{y}")
+            dialog.minsize(width, height)
             dialog.grab_set()
             try:
                 dialog.lift()
@@ -2296,7 +2511,32 @@ class WorkflowApp(tk.Tk):
             "mask_edge": float(best_foreground_edge),
         }
 
+    def _image_has_small_color_accents(self, stats: Optional[dict[str, float]] = None) -> bool:
+        """Erkennt kleine, echte Farbakzente in sonst CAD-typischen Logos."""
+        if stats is None:
+            stats = self._image_stats_for_step1_recommendation()
+        if not stats:
+            return False
+        coverage = float(stats.get("colored_ink_coverage", 0.0) or 0.0)
+        count = int(round(float(stats.get("colored_component_count", 0.0) or 0.0)))
+        largest = float(stats.get("colored_largest_component", 0.0) or 0.0)
+        largest_span = float(stats.get("colored_largest_bbox_span", 0.0) or 0.0)
+        sat_clear = float(stats.get("sat_clear", 0.0) or 0.0)
+        return bool(
+            sat_clear >= 0.0015
+            and coverage >= 0.00015
+            and coverage <= 0.065
+            and count >= 1
+            and largest <= 0.018
+            and largest_span <= 0.11
+        )
+
     def recommend_step1_mode_from_image(self, force: bool = False) -> None:
+        # Diese Routine entscheidet, welcher Schritt-1-Modus aus Sicht des
+        # Programms am sinnvollsten ist. Die Entscheidung basiert nicht nur auf
+        # einer einzelnen Kennzahl, sondern auf mehreren Bildmerkmalen wie
+        # Schwarz/Weiß-Anteil, echter Farbstruktur, lokaler Kontrastmaske und
+        # dem Scan-/Rausch-Eindruck der Vorlage.
         if self.original_image is None:
             return
         current_key = str(self.current_path) if self.current_path else f"image-{id(self.original_image)}"
@@ -2353,10 +2593,116 @@ class WorkflowApp(tk.Tk):
             and stats["near_black"] >= 0.01
             and stats["near_white"] >= 0.30
         )
+        if bw_lineart_like:
+            msg = tr("msg.step1_recommend_existing_bw")
+            if messagebox.askyesno(tr("msg.perfect_bw_title"), msg, default=messagebox.YES, icon=messagebox.QUESTION):
+                self.use_existing_step1_image_preview()
+                self.status_var.set(tr("status.existing_image_used"))
+            else:
+                try:
+                    self.step1_notebook.select(self.manual_tab)
+                except Exception:
+                    pass
+                self.status_var.set(tr("status.existing_image_skipped"))
+            return
+
         try:
             photo_scan_analysis = recolor.RecolorApp.analyze_photo_scan_logo_problem(self.original_image)
         except Exception:
             photo_scan_analysis = None
+
+        small_accents = self._image_has_small_color_accents(stats)
+        color_complexity = float(getattr(photo_scan_analysis, "color_complexity", 0.0) or 0.0) if photo_scan_analysis else 0.0
+        photo_score = int(getattr(photo_scan_analysis, "score", 0) or 0) if photo_scan_analysis else 0
+        badge_bw_structure = (
+            stats["near_black"] >= 0.045
+            and stats["near_white"] >= 0.18
+            and stats["dynamic"] >= 90.0
+            and stats.get("edge_density", 0.0) >= 0.018
+        )
+        flat_technical_color = (
+            color_like
+            and color_complexity > 0.0
+            and color_complexity <= 26.0
+            and stats.get("edge_density", 0.0) < 0.070
+            and not badge_bw_structure
+            and not small_accents
+        )
+        cad_bw_preferred = (
+            color_like
+            and self.motif_profile_var.get() in {"logo", "mixed"}
+            and not flat_technical_color
+            and (
+                photo_score >= 2
+                or color_complexity >= 42.0
+                or badge_bw_structure
+                or (stats["near_black"] >= 0.035 and stats["near_white"] >= 0.18 and stats["dynamic"] >= 95.0)
+                or small_accents
+            )
+        )
+        # Priorität für die Vektorisierung: so wenig Farben wie möglich.
+        # Für Logo/CAD/Mixed-Motive ist ein kontrastreiches Schwarz/Weiß- oder
+        # Schwarz/Weiß/Grau-Ergebnis fast immer stabiler als viele technische
+        # Zielfarben. Deshalb wird die Farbinformation hier nicht als Grund
+        # verwendet, um direkt in den Farben-Umfärben-Modus zu wechseln.
+        minimal_color_priority = self.motif_profile_var.get() in {"logo", "mixed"}
+        mask_coverage = float(stats.get("mask_coverage", 0.0) or 0.0)
+        mask_candidate = (
+            0.50 <= mask_coverage <= 88.0
+            and stats["dynamic"] >= 35.0
+            and (
+                stats["near_bw"] >= 0.42
+                or badge_bw_structure
+                or structured_color
+                or color_like
+                or stats.get("edge_density", 0.0) >= 0.010
+            )
+        )
+        serious_scan_problem = bool(
+            photo_scan_analysis
+            and (
+                photo_scan_analysis.score >= 7
+                or photo_scan_analysis.background_noise >= 10.0
+                or photo_scan_analysis.small_specks >= 900
+            )
+        )
+        # Primär: Logo-Maske. Mehrere Farben verhindern die Logo-Maske nicht,
+        # weil die spätere Vektorisierung bewusst möglichst wenige Farben nutzen soll.
+        logo_mask_preferred = bool(
+            minimal_color_priority
+            and mask_candidate
+            and not serious_scan_problem
+        )
+        # Sekundär: Foto-Scan S/W. Dieser Modus greift erst, wenn die Logo-Maske
+        # nicht ausreichend plausibel ist und echte Scan-/Rauschprobleme vorliegen.
+        photo_scan_preferred = bool(
+            photo_scan_analysis
+            and not logo_mask_preferred
+            and (
+                photo_scan_analysis.score >= 5
+                or photo_scan_analysis.background_noise >= 6.0
+                or photo_scan_analysis.small_specks >= 350
+                or photo_scan_analysis.edge_fray >= 0.050
+                or (
+                    photo_scan_analysis.score >= 4
+                    and color_like
+                    and not badge_bw_structure
+                    and not flat_technical_color
+                )
+            )
+        )
+        # Tertiär: Farben umfärben. Für Logo/Mixed wird dieser Pfad nur noch als
+        # Notlösung verwendet, wenn kein brauchbarer Schwarz/Weiß-Kandidat vorliegt.
+        color_recolor_preferred = bool(
+            color_like
+            and not logo_mask_preferred
+            and not photo_scan_preferred
+            and (
+                not minimal_color_priority
+                or not mask_candidate
+            )
+        )
+
         if photo_scan_analysis and (
             photo_scan_analysis.score >= 5
             or photo_scan_analysis.background_noise >= 6.0
@@ -2364,34 +2710,96 @@ class WorkflowApp(tk.Tk):
             or photo_scan_analysis.small_specks >= 500
         ):
             self.show_problem_image_hint(tr("status.problem_hint_shown"))
-        if photo_scan_analysis and photo_scan_analysis.score >= 3 and color_like:
-            max_colors = 3 if self.motif_profile_var.get() == "logo" else 4 if self.motif_profile_var.get() == "mixed" else 6
-            min_area = 10 if self.motif_profile_var.get() != "organic" else 5
-            noise = 78 if photo_scan_analysis.score >= 6 else 65
+
+        # Vorrang-Regel: saubere, kontrastreiche Logos sollen bevorzugt
+        # über die Logo-Maske laufen. Das verhindert, dass flächige Badges mit
+        # wenigen klaren Formen unnötig als Foto-Scan interpretiert werden.
+        if logo_mask_preferred:
+            threshold = int(max(1, min(100, round(stats["mask_threshold"]))))
+            blur = int(max(5, min(151, round(stats["mask_blur"]))))
+            coverage = stats["mask_coverage"]
+            target = stats.get("mask_target_coverage", coverage)
+            try:
+                self.step1_notebook.select(self.logo_tab)
+            except Exception:
+                pass
+            msg = tr(
+                "msg.step1_recommend_mask",
+                threshold=threshold,
+                blur=blur,
+                coverage=coverage,
+                target=target,
+            )
+            apply_logo_mask = messagebox.askyesno(
+                tr("msg.step1_recommend_title"),
+                f"{msg}\n\nMehrere Farben erkannt, aber für die Vektorisierung wird bewusst die kontrastreiche Logo-Maske bevorzugt.",
+                default=messagebox.YES,
+                icon=messagebox.QUESTION,
+            )
+            if apply_logo_mask:
+                self.logo_mask_threshold_var.set(threshold)
+                self.logo_mask_blur_var.set(blur)
+                self.logo_mask_clean_var.set(True)
+                self.logo_mask_fg_var.set("0,0,0")
+                self.logo_mask_bg_var.set("255,255,255")
+                self.logo_mask_preserve_accents_var.set(True)
+                self.logo_mask_accent_var.set("128,64,0")
+                self.create_logo_mask_preview()
+                self.status_var.set(f"Logo-Maske automatisch empfohlen und angewendet (Schwelle {threshold}, Radius {blur}).")
+            else:
+                self.status_var.set("Automatische Logo-Masken-Empfehlung übersprungen.")
+            return
+
+        # Der Foto-Scan-S/W-Pfad bleibt die zweite Wahl und darf nur dann greifen,
+        # wenn Logo-Maske nicht passend erscheint und das Bild tatsächlich eine
+        # scanartige oder störungsreiche Bereinigung benötigt.
+        if photo_scan_preferred:
+            max_colors = 2 if self.motif_profile_var.get() == "logo" else 3 if self.motif_profile_var.get() == "mixed" else 4
+            min_area = 8 if self.motif_profile_var.get() != "organic" else 5
+            noise = 72 if cad_bw_preferred else 78 if photo_scan_analysis.score >= 6 else 65
             try:
                 self.step1_notebook.select(self.photo_scan_tab)
             except Exception:
                 pass
             msg = tr(
-                "msg.step1_recommend_photo_scan",
+                "msg.step1_recommend_photo_scan_bw",
                 score=photo_scan_analysis.score,
                 colors=int(photo_scan_analysis.color_complexity),
                 noise=photo_scan_analysis.background_noise,
                 specks=photo_scan_analysis.small_specks,
+                default=tr(
+                    "msg.step1_recommend_photo_scan",
+                    score=photo_scan_analysis.score,
+                    colors=int(photo_scan_analysis.color_complexity),
+                    noise=photo_scan_analysis.background_noise,
+                    specks=photo_scan_analysis.small_specks,
+                ),
             )
+            if small_accents:
+                msg = f"{msg}\n\n{tr('msg.step1_recommend_preserve_accents')}"
             apply_photo_scan = messagebox.askyesno(
                 tr("msg.step1_recommend_title"),
                 msg,
-                default=messagebox.NO,
+                default=messagebox.YES,
                 icon=messagebox.QUESTION,
             )
             if apply_photo_scan:
+                self.photo_scan_mode_var.set("bw")
                 self.photo_scan_max_colors_var.set(max_colors)
                 self.photo_scan_min_area_var.set(min_area)
                 self.photo_scan_noise_var.set(noise)
+                self.photo_scan_foreground_distance_var.set(24)
+                self.photo_scan_weak_contrast_var.set(72)
                 self.photo_scan_protect_background_var.set(True)
+                self.photo_scan_protect_thin_lines_var.set(True)
+                self.photo_scan_close_lines_var.set(True)
+                self.photo_scan_fill_small_holes_var.set(False)
+                if hasattr(self, "photo_scan_preserve_accents_var"):
+                    # Bei S/W-Logo/Badge lieber aktiv lassen: farbige Sterne/Schrift
+                    # werden danach lokal schwarz/weiss kontrastierend gesetzt.
+                    self.photo_scan_preserve_accents_var.set(bool(small_accents or has_relevant_color))
                 self.photo_scan_despeckle_var.set(True)
-                self.photo_scan_despeckle_area_var.set(self._auto_photo_scan_despeckle_area())
+                self.photo_scan_despeckle_area_var.set(max(3, min(60, self._auto_photo_scan_despeckle_area())))
                 self.create_photo_scan_cleanup_preview(show_busy=True)
                 self.status_var.set(tr("status.step1_recommend_photo_scan_applied", score=photo_scan_analysis.score))
             else:
@@ -2432,20 +2840,10 @@ class WorkflowApp(tk.Tk):
                 self.status_var.set(tr("status.step1_recommend_mask_skipped"))
             return
 
-        if bw_lineart_like:
-            msg = tr("msg.step1_recommend_existing_bw")
-            if messagebox.askyesno(tr("msg.step1_recommend_title"), msg, default=messagebox.YES, icon=messagebox.QUESTION):
-                self.use_existing_step1_image_preview()
-                self.status_var.set(tr("status.existing_image_used"))
-            else:
-                try:
-                    self.step1_notebook.select(self.manual_tab)
-                except Exception:
-                    pass
-                self.status_var.set(tr("status.existing_image_skipped"))
-            return
-
-        if color_like:
+        # Tertiäre Empfehlung: strukturierte Farbbilder, die weder klare
+        # Masken-Kandidaten noch typische Foto-Scan-Fälle sind, werden über
+        # den Farben-Umfärben-Modus vorbereitet.
+        if color_recolor_preferred:
             try:
                 self.step1_notebook.select(self.basic_tab)
             except Exception:
@@ -2500,6 +2898,7 @@ class WorkflowApp(tk.Tk):
             pass
         self.status_var.set(tr("status.step1_recommend_manual"))
 
+
     # ------------------------------------------------------------------ Schritt 1 Logik
     def choose_input_image(self) -> None:
         initial_dir = self._initial_dir_from_config("input")
@@ -2510,12 +2909,10 @@ class WorkflowApp(tk.Tk):
         )
         if path:
             self._remember_input_path(path)
-            self._run_step1_auto_after_load = messagebox.askyesno(
-                tr("msg.step1_auto_prompt_title"),
-                tr("msg.step1_auto_prompt_body"),
-                default=messagebox.YES,
-                icon=messagebox.QUESTION,
-            )
+            # Erst laden und analysieren. So kann ein bereits sauberes
+            # Schwarz/Weiß-/Lineart-Bild erkannt werden, bevor die allgemeine
+            # Auto-Erkennung überhaupt gefragt wird.
+            self._run_step1_auto_after_load = True
             self.load_input_image(path)
 
     def load_input_image(self, path: str) -> None:
@@ -2530,7 +2927,11 @@ class WorkflowApp(tk.Tk):
             self.set_progress(35, tr("progress.prepare_image"))
             self.current_path = Path(path)
             self.original_image = img
-            self._perfect_bw_source = self._is_perfect_black_white_array(np.array(_flatten_rgba_to_rgb(img)))
+            flat_rgb = np.array(_flatten_rgba_to_rgb(img))
+            self._perfect_bw_source = (
+                self._is_perfect_black_white_array(flat_rgb)
+                or self._is_high_contrast_black_white_array(flat_rgb)
+            )
             self.step2_auto_prompt_pending = True
             self.prepared_image = None
             self.edited_image = self.get_prepared_image(force=True)
@@ -2558,11 +2959,21 @@ class WorkflowApp(tk.Tk):
                 except Exception:
                     pass
                 self.status_var.set(tr("status.existing_image_skipped"))
-        elif self._run_step1_auto_after_load:
-            # Nach dem Laden ist das Bild sichtbar; die Auto-Analyse läuft nur nach Zustimmung.
-            self.after_idle(lambda: self.recommend_step1_mode_from_image(force=False))
         else:
-            self.status_var.set(tr("status.step1_auto_skipped"))
+            try:
+                self._run_step1_auto_after_load = messagebox.askyesno(
+                    tr("msg.step1_auto_prompt_title"),
+                    tr("msg.step1_auto_prompt_body"),
+                    default=messagebox.YES,
+                    icon=messagebox.QUESTION,
+                )
+            except Exception:
+                self._run_step1_auto_after_load = True
+            if self._run_step1_auto_after_load:
+                # Nach dem Laden ist das Bild sichtbar; die Auto-Analyse läuft nur nach Zustimmung.
+                self.after_idle(lambda: self.recommend_step1_mode_from_image(force=False))
+            else:
+                self.status_var.set(tr("status.step1_auto_skipped"))
 
     def get_prepared_image(self, force: bool = False) -> Optional[Image.Image]:
         if self.original_image is None:
@@ -2770,6 +3181,8 @@ class WorkflowApp(tk.Tk):
         self.photo_scan_protect_thin_lines_var.set(True)
         self.photo_scan_close_lines_var.set(True)
         self.photo_scan_fill_small_holes_var.set(False)
+        self.photo_scan_preserve_accents_var.set(True)
+        self.photo_scan_mode_var.set("auto")
 
         self.clear_basic_rows()
         for row in self.manual_rows:
@@ -2941,14 +3354,59 @@ class WorkflowApp(tk.Tk):
                 pass
         self.preview_after_id = self.after(180, self.update_step1_preview)
 
+    def select_step1_tab(self, key: str) -> None:
+        """Select a Step-1 page from the method dropdown."""
+        try:
+            tab = getattr(self, "step1_tabs_by_key", {}).get(key)
+            if tab is None:
+                return
+            self.step1_notebook.select(tab)
+            self.step1_tab_key_var.set(key)
+            if hasattr(self, "step1_tab_display_var"):
+                self.step1_tab_display_var.set(self._step1_mode_label(key))
+            if hasattr(self, "step1_tab_hint_var"):
+                self.step1_tab_hint_var.set(self._step1_mode_hint(key))
+            self.on_step1_mode_changed()
+        except Exception:
+            pass
+
+    def on_step1_mode_display_changed(self) -> None:
+        try:
+            label = self.step1_tab_display_var.get()
+            key = getattr(self, "step1_mode_display_to_key", {}).get(label)
+            if key is None:
+                for candidate in getattr(self, "step1_mode_keys", []):
+                    if label == self._step1_mode_label(candidate):
+                        key = candidate
+                        break
+            if key:
+                self.select_step1_tab(key)
+        except Exception:
+            pass
+
     def on_step1_mode_changed(self) -> None:
+        try:
+            selected_tab = self.nametowidget(self.step1_notebook.select())
+            key = getattr(self, "step1_tab_keys_by_widget", {}).get(selected_tab)
+            if key:
+                self.step1_tab_key_var.set(key)
+                if hasattr(self, "step1_tab_display_var"):
+                    self.step1_tab_display_var.set(self._step1_mode_label(key))
+                if hasattr(self, "step1_tab_hint_var"):
+                    self.step1_tab_hint_var.set(self._step1_mode_hint(key))
+        except Exception:
+            pass
         self.update_step1_picker_cursor()
         self.update_step1_preview()
 
     def update_step1_picker_cursor(self) -> None:
         try:
-            cursor = "crosshair" if self.step1_notebook.index(self.step1_notebook.select()) == 1 else ""
-            self.step1_original_canvas.canvas.configure(cursor=cursor)
+            selected_tab = self.nametowidget(self.step1_notebook.select())
+            original_cursor = "crosshair" if selected_tab is self.manual_tab else ""
+            edited_cursor = "crosshair" if hasattr(self, "eraser_tab") and selected_tab is self.eraser_tab else ""
+            self.step1_original_canvas.canvas.configure(cursor=original_cursor)
+            if hasattr(self, "step1_edited_canvas"):
+                self.step1_edited_canvas.canvas.configure(cursor=edited_cursor)
         except Exception:
             pass
 
@@ -3078,7 +3536,11 @@ class WorkflowApp(tk.Tk):
             pass
 
     def on_pick_color(self, rgb: RGB, x: int, y: int) -> None:
-        if self.step1_notebook.index(self.step1_notebook.select()) != 1:
+        try:
+            selected_tab = self.nametowidget(self.step1_notebook.select())
+        except Exception:
+            selected_tab = None
+        if selected_tab is not self.manual_tab:
             self.status_var.set(tr("status.pixel_color_at", x=x, y=y, rgb=_rgb_to_text(rgb)))
             return
         if not self.manual_rows:
@@ -3086,6 +3548,159 @@ class WorkflowApp(tk.Tk):
         index = max(0, min(self.selected_manual_row_var.get(), len(self.manual_rows) - 1))
         self.manual_rows[index].set_source_rgb(rgb)
         self.status_var.set(tr("status.color_copied_to_row", rgb=_rgb_to_text(rgb), row=index + 1))
+
+    def _is_step1_eraser_mode(self) -> bool:
+        try:
+            selected_tab = self.nametowidget(self.step1_notebook.select())
+            return hasattr(self, "eraser_tab") and selected_tab is self.eraser_tab
+        except Exception:
+            return False
+
+    def _canvas_to_edited_image_xy(self, event: tk.Event) -> Optional[Tuple[int, int]]:
+        canvas = getattr(self, "step1_edited_canvas", None)
+        if canvas is None or canvas.image is None:
+            return None
+        try:
+            zoom = max(0.0001, float(canvas.zoom))
+            x = int(round((int(event.x) - float(canvas.offset_x)) / zoom))
+            y = int(round((int(event.y) - float(canvas.offset_y)) / zoom))
+            if 0 <= x < canvas.image.width and 0 <= y < canvas.image.height:
+                return x, y
+        except Exception:
+            return None
+        return None
+
+    def _ensure_eraser_work_image(self) -> bool:
+        if self.original_image is None:
+            messagebox.showwarning(tr("msg.no_image_title"), tr("msg.no_image_load"))
+            return False
+        if self.special_result_mode != "eraser" or self.special_result_image is None:
+            if self.edited_image is not None:
+                base = self.edited_image
+            else:
+                base = self.get_prepared_image(force=False)
+            self.special_result_image = _flatten_rgba_to_rgb(base).copy()
+            self.special_result_mode = "eraser"
+        if self.special_result_image.mode not in ("RGB", "RGBA"):
+            self.special_result_image = self.special_result_image.convert("RGB")
+        self.edited_image = self.special_result_image.copy()
+        return True
+
+    def _eraser_stamp_bounds(self, x: int, y: int) -> Tuple[int, int, int, int]:
+        size = max(1, min(999, int(float(self.eraser_size_var.get()))))
+        radius = max(0, size // 2)
+        return x - radius, y - radius, x - radius + size - 1, y - radius + size - 1
+
+    def _stamp_eraser_at(self, draw: ImageDraw.ImageDraw, x: int, y: int) -> None:
+        try:
+            rgb = _parse_rgb_any(self.eraser_color_var.get())
+        except Exception:
+            rgb = (255, 255, 255)
+        fill: Any
+        if self.special_result_image is not None and self.special_result_image.mode == "RGBA":
+            fill = (*rgb, 255)
+        else:
+            fill = rgb
+        bounds = self._eraser_stamp_bounds(int(x), int(y))
+        if (self.eraser_shape_var.get() or "round") == "square":
+            draw.rectangle(bounds, fill=fill)
+        else:
+            draw.ellipse(bounds, fill=fill)
+
+    def _paint_eraser_line(self, start: Tuple[int, int], end: Tuple[int, int]) -> None:
+        if self.special_result_image is None:
+            return
+        draw = ImageDraw.Draw(self.special_result_image)
+        sx, sy = start
+        ex, ey = end
+        size = max(1, min(999, int(float(self.eraser_size_var.get()))))
+        distance = math.hypot(ex - sx, ey - sy)
+        step = max(1.0, size * 0.35)
+        count = max(1, int(math.ceil(distance / step)))
+        for index in range(count + 1):
+            t = index / max(1, count)
+            x = int(round(sx + (ex - sx) * t))
+            y = int(round(sy + (ey - sy) * t))
+            self._stamp_eraser_at(draw, x, y)
+        self.edited_image = self.special_result_image.copy()
+        self.step1_edited_canvas.set_image(self.edited_image, reset_view=False)
+
+    def on_step1_edited_press(self, event: tk.Event) -> str | None:
+        if not self._is_step1_eraser_mode():
+            return self.step1_edited_canvas._start_left_action(event)
+        if not self._ensure_eraser_work_image():
+            return "break"
+        xy = self._canvas_to_edited_image_xy(event)
+        if xy is None:
+            return "break"
+        self._eraser_last_xy = xy
+        self._paint_eraser_line(xy, xy)
+        self.eraser_status_var.set(tr("status.eraser_painted", x=xy[0], y=xy[1]))
+        self.status_var.set(self.eraser_status_var.get())
+        return "break"
+
+    def on_step1_edited_motion(self, event: tk.Event) -> str | None:
+        if not self._is_step1_eraser_mode():
+            return self.step1_edited_canvas._move_left_action(event)
+        if not self._ensure_eraser_work_image():
+            return "break"
+        xy = self._canvas_to_edited_image_xy(event)
+        if xy is None:
+            return "break"
+        last = self._eraser_last_xy or xy
+        self._paint_eraser_line(last, xy)
+        self._eraser_last_xy = xy
+        self.eraser_status_var.set(tr("status.eraser_painted", x=xy[0], y=xy[1]))
+        self.status_var.set(self.eraser_status_var.get())
+        return "break"
+
+    def on_step1_edited_release(self, event: tk.Event) -> str | None:
+        if not self._is_step1_eraser_mode():
+            return self.step1_edited_canvas._end_left_action(event)
+        self._eraser_last_xy = None
+        return "break"
+
+    def update_eraser_color_swatch(self) -> None:
+        try:
+            rgb = _parse_rgb_any(self.eraser_color_var.get())
+            color = _rgb_to_hex(rgb)
+        except Exception:
+            color = "#cccccc"
+        try:
+            self.eraser_color_swatch.configure(bg=color)
+        except Exception:
+            pass
+
+    def choose_eraser_color(self) -> None:
+        try:
+            initial = _rgb_to_hex(_parse_rgb_any(self.eraser_color_var.get()))
+        except Exception:
+            initial = "#ffffff"
+        color = colorchooser.askcolor(color=initial, title=tr("step1.eraser_color_choose"))
+        if color and color[0]:
+            rgb = tuple(int(round(v)) for v in color[0])
+            self.eraser_color_var.set(_rgb_to_text(rgb))
+
+    def prepare_eraser_from_current_preview(self) -> None:
+        if self.original_image is None:
+            messagebox.showwarning(tr("msg.no_image_title"), tr("msg.no_image_load"))
+            return
+        if self.preview_after_id:
+            try:
+                self.after_cancel(self.preview_after_id)
+            except Exception:
+                pass
+            self.preview_after_id = None
+        # Aktuelle Ansicht als Radier-Grundlage übernehmen. Falls bereits im Radierer
+        # gearbeitet wurde, bleibt genau dieser Stand erhalten.
+        if self.edited_image is None:
+            self.edited_image = self.get_prepared_image(force=False).copy()
+        self.special_result_image = _flatten_rgba_to_rgb(self.edited_image).copy()
+        self.special_result_mode = "eraser"
+        self.edited_image = self.special_result_image.copy()
+        self.step1_edited_canvas.set_image(self.edited_image, reset_view=False)
+        self.eraser_status_var.set(tr("status.eraser_ready"))
+        self.status_var.set(self.eraser_status_var.get())
 
     def collect_basic_mappings(self) -> List[Any]:
         mappings = []
@@ -3114,16 +3729,33 @@ class WorkflowApp(tk.Tk):
         self.preview_after_id = None
         if self.original_image is None:
             return
-        mode = self.step1_notebook.index(self.step1_notebook.select())
         try:
-            if mode == 2 and self.special_result_mode == "logo" and self.special_result_image is not None:
+            selected_tab = self.nametowidget(self.step1_notebook.select())
+        except Exception:
+            selected_tab = None
+        try:
+            if hasattr(self, "eraser_tab") and selected_tab is self.eraser_tab:
+                if self.special_result_mode == "eraser" and self.special_result_image is not None:
+                    self.edited_image = self.special_result_image.copy()
+                elif self.edited_image is not None:
+                    self.special_result_image = _flatten_rgba_to_rgb(self.edited_image).copy()
+                    self.special_result_mode = "eraser"
+                    self.edited_image = self.special_result_image.copy()
+                else:
+                    base = self.get_prepared_image(force=False)
+                    self.special_result_image = _flatten_rgba_to_rgb(base).copy()
+                    self.special_result_mode = "eraser"
+                    self.edited_image = self.special_result_image.copy()
+            elif self.special_result_mode == "existing" and self.special_result_image is not None:
                 self.edited_image = self.special_result_image.copy()
-            elif mode == 3 and self.special_result_mode == "photo_scan" and self.special_result_image is not None:
+            elif selected_tab is self.logo_tab and self.special_result_mode == "logo" and self.special_result_image is not None:
                 self.edited_image = self.special_result_image.copy()
-            elif mode == 1:
+            elif selected_tab is self.photo_scan_tab and self.special_result_mode == "photo_scan" and self.special_result_image is not None:
+                self.edited_image = self.special_result_image.copy()
+            elif selected_tab is self.manual_tab:
                 mappings = self.collect_manual_mappings()
                 self.edited_image = recolor.RecolorApp.apply_mappings(self.original_image, mappings) if mappings else self.original_image.copy()
-            elif mode == 3:
+            elif selected_tab is self.photo_scan_tab:
                 base = self.get_prepared_image(force=False)
                 self.edited_image = base.copy()
             else:
@@ -3163,6 +3795,104 @@ class WorkflowApp(tk.Tk):
         except Exception as exc:
             messagebox.showerror(tr("msg.error"), tr("msg.logo_mask_error", error=exc))
 
+    def _build_logo_direct_black_image_local(
+        self,
+        image: Image.Image,
+        threshold: int,
+        foreground: RGB,
+        background: RGB,
+        clean: bool = False,
+    ) -> Image.Image:
+        """Fallback fuer den Button aus ui_step1.py.
+
+        Dieser lokale Weg ist absichtlich in workflow_app.py enthalten, damit der
+        Button auch dann funktioniert, wenn recolor_engine.py aus einem aelteren
+        Stand stammt. Er setzt saubere, dunkle Motivbereiche direkt auf exaktes
+        Schwarz, ohne die lokale Logo-Masken-Bereinigung zu erzwingen.
+        """
+        rgba = np.array(image.convert("RGBA"), dtype=np.uint8)
+        rgb = rgba[:, :, :3].astype(np.float32)
+        alpha = rgba[:, :, 3] > 0
+        if not np.any(alpha):
+            return image.convert("RGBA")
+
+        height, width = alpha.shape
+        gray = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+
+        border = max(1, int(round(min(height, width) * 0.03)))
+        border_mask = np.zeros((height, width), dtype=bool)
+        border_mask[:border, :] = True
+        border_mask[-border:, :] = True
+        border_mask[:, :border] = True
+        border_mask[:, -border:] = True
+        bg_candidates = border_mask & alpha
+        if int(np.count_nonzero(bg_candidates)) < max(20, (height * width) // 200):
+            bg_candidates = alpha & (gray >= np.percentile(gray[alpha], 65))
+        if not np.any(bg_candidates):
+            bg_candidates = alpha
+
+        bg_rgb = np.median(rgb[bg_candidates], axis=0)
+        bg_gray = float(0.299 * bg_rgb[0] + 0.587 * bg_rgb[1] + 0.114 * bg_rgb[2])
+        color_distance = np.linalg.norm(rgb - bg_rgb.reshape(1, 1, 3), axis=2)
+        darker = np.maximum(0.0, bg_gray - gray)
+
+        sensitivity = max(1, min(100, int(threshold)))
+        tone_threshold = float(np.interp(sensitivity, [1, 100], [5.0, 42.0]))
+        color_threshold = float(np.interp(sensitivity, [1, 100], [10.0, 62.0]))
+
+        mask = alpha & (
+            ((darker >= tone_threshold) & (color_distance >= color_threshold * 0.55))
+            | (darker >= tone_threshold * 1.55)
+            | (color_distance >= color_threshold * 1.20)
+        )
+
+        if clean:
+            mask_img = Image.fromarray((mask.astype(np.uint8) * 255), "L")
+            mask_img = mask_img.filter(ImageFilter.MedianFilter(size=3))
+            mask = np.array(mask_img, dtype=np.uint8) >= 128
+
+        out = np.zeros((height, width, 4), dtype=np.uint8)
+        out[:, :, 0:3] = np.array(background, dtype=np.uint8)
+        out[:, :, 3] = 255
+        out[mask, 0:3] = np.array(foreground, dtype=np.uint8)
+        return Image.fromarray(out, "RGBA")
+
+    def create_logo_direct_black_preview(self) -> None:
+        if self.original_image is None:
+            messagebox.showwarning(tr("msg.no_image_title"), tr("msg.no_image_load"))
+            return
+        try:
+            base = self.get_prepared_image(force=True)
+            threshold = max(1, min(100, int(self.logo_mask_threshold_var.get())))
+            foreground = _parse_rgb_any(self.logo_mask_fg_var.get())
+            background = _parse_rgb_any(self.logo_mask_bg_var.get())
+            clean = bool(self.logo_mask_clean_var.get())
+            builder = getattr(recolor.RecolorApp, "build_logo_direct_black_image", None)
+            if callable(builder):
+                self.special_result_image = builder(
+                    base,
+                    threshold=threshold,
+                    foreground=foreground,
+                    background=background,
+                    clean=clean,
+                    preserve_color_accents=bool(self.logo_mask_preserve_accents_var.get()),
+                    accent=_parse_rgb_any(self.logo_mask_accent_var.get()),
+                )
+            else:
+                self.special_result_image = self._build_logo_direct_black_image_local(
+                    base,
+                    threshold=threshold,
+                    foreground=foreground,
+                    background=background,
+                    clean=clean,
+                )
+            self.special_result_mode = "logo"
+            self.edited_image = self.special_result_image.copy()
+            self.step1_edited_canvas.set_image(self.edited_image, reset_view=False)
+            self.status_var.set(tr("status.logo_direct_black_created"))
+        except Exception as exc:
+            messagebox.showerror(tr("msg.error"), tr("msg.logo_direct_black_error", error=exc))
+
     def _auto_photo_scan_despeckle_area(self) -> int:
         image = self.original_image or self.edited_image
         if image is None:
@@ -3180,26 +3910,77 @@ class WorkflowApp(tk.Tk):
             self.photo_scan_despeckle_area_var.set(self._auto_photo_scan_despeckle_area())
         self.schedule_step1_preview()
 
+    def run_photo_scan_auto_best(self) -> None:
+        # Auto bewusst ohne erneutes Zuruecksetzen der Feinwerte starten.
+        # So koennen Ziel-Farben, Min. Flaeche oder schwache Details angepasst
+        # und trotzdem die technische Auto-Bewertung genutzt werden.
+        self.photo_scan_mode_var.set("auto")
+        self.create_photo_scan_cleanup_preview(show_busy=True)
+
+    def apply_photo_scan_mode_defaults(self) -> None:
+        mode = (self.photo_scan_mode_var.get() or "auto").strip().lower()
+        base_min = self._auto_photo_scan_despeckle_area()
+        presets = {
+            "auto": dict(max_colors=3, min_area=max(4, base_min), noise=70, distance=28, weak=35, bg=True, obj=True, despeckle=True, despeckle_area=base_min, thin=True, close=True, holes=True),
+            "clean": dict(max_colors=2, min_area=max(8, base_min * 2), noise=88, distance=38, weak=12, bg=True, obj=True, despeckle=True, despeckle_area=max(base_min * 2, 8), thin=True, close=True, holes=True),
+            "detail": dict(max_colors=4, min_area=max(1, base_min // 2), noise=42, distance=18, weak=78, bg=True, obj=True, despeckle=False, despeckle_area=0, thin=True, close=True, holes=False),
+            # Farbig darf nicht die komplette Papierstruktur als Arbeitsbereich nehmen,
+            # sonst wird der Modus bei großen Scans sehr langsam. Die Objektmaske bleibt
+            # aktiv, Farben werden aber trotzdem getrennt erhalten.
+            "color": dict(max_colors=4, min_area=max(8, base_min * 2), noise=64, distance=28, weak=28, bg=True, obj=True, despeckle=True, despeckle_area=max(base_min * 2, 10), thin=True, close=True, holes=True),
+            "bw": dict(max_colors=1, min_area=max(2, base_min // 2), noise=62, distance=24, weak=70, bg=True, obj=True, despeckle=True, despeckle_area=max(1, base_min // 2), thin=True, close=True, holes=False),
+            # Verblasster Druck ist ein eigener Low-Contrast-Weg: Hintergrund abziehen,
+            # lokale Druckspuren verstärken und als Schwarz/Weiß-Maske ausgeben.
+            "faded": dict(max_colors=1, min_area=max(1, base_min // 2), noise=54, distance=16, weak=92, bg=True, obj=True, despeckle=True, despeckle_area=max(1, base_min // 2), thin=True, close=True, holes=False),
+        }
+        preset = presets.get(mode, presets["auto"])
+        self.photo_scan_max_colors_var.set(int(preset["max_colors"]))
+        self.photo_scan_min_area_var.set(int(preset["min_area"]))
+        self.photo_scan_noise_var.set(int(preset["noise"]))
+        self.photo_scan_foreground_distance_var.set(int(preset["distance"]))
+        self.photo_scan_weak_contrast_var.set(int(preset["weak"]))
+        self.photo_scan_protect_background_var.set(bool(preset["bg"]))
+        self.photo_scan_object_mask_first_var.set(bool(preset["obj"]))
+        self.photo_scan_despeckle_var.set(bool(preset["despeckle"]))
+        self.photo_scan_despeckle_area_var.set(int(preset["despeckle_area"]))
+        self.photo_scan_protect_thin_lines_var.set(bool(preset["thin"]))
+        self.photo_scan_close_lines_var.set(bool(preset["close"]))
+        self.photo_scan_fill_small_holes_var.set(bool(preset["holes"]))
+        self.photo_scan_status_var.set(tr(f"status.photo_scan_mode_{mode}", default=""))
+
+    def _current_photo_scan_params(self) -> dict[str, Any]:
+        mode = (self.photo_scan_mode_var.get() or "auto").strip().lower()
+        if mode not in {"auto", "clean", "detail", "color", "bw", "faded"}:
+            mode = "auto"
+            self.photo_scan_mode_var.set(mode)
+        # Presets werden nur beim Anklicken eines Modus gesetzt.
+        # Beim Berechnen selbst duerfen manuell geaenderte Feinwerte nicht
+        # wieder ueberschrieben werden.
+        return {
+            "mode": mode,
+            "max_colors": max(1, min(8, int(self.photo_scan_max_colors_var.get()))),
+            "min_area": max(1, int(self.photo_scan_min_area_var.get())),
+            "noise_suppression": max(0, min(100, int(self.photo_scan_noise_var.get()))),
+            "foreground_distance": max(5, min(80, int(self.photo_scan_foreground_distance_var.get()))),
+            "weak_contrast": max(0, min(100, int(self.photo_scan_weak_contrast_var.get()))),
+            "protect_background": bool(self.photo_scan_protect_background_var.get()),
+            "object_mask_first": bool(self.photo_scan_object_mask_first_var.get()),
+            "despeckle": bool(self.photo_scan_despeckle_var.get()),
+            "despeckle_min_area": max(0, min(500, int(self.photo_scan_despeckle_area_var.get()))),
+            "protect_thin_lines": bool(self.photo_scan_protect_thin_lines_var.get()),
+            "close_lines": bool(self.photo_scan_close_lines_var.get()),
+            "fill_small_holes": bool(self.photo_scan_fill_small_holes_var.get()),
+            "preserve_color_accents": bool(self.photo_scan_preserve_accents_var.get()),
+        }
+
     def create_photo_scan_cleanup_preview(self, show_busy: bool = True) -> None:
         if self.original_image is None:
             messagebox.showwarning(tr("msg.no_image_title"), tr("msg.no_image_load"))
             return
         try:
             base = self.get_prepared_image(force=True)
-            params = {
-                "max_colors": max(1, min(12, int(self.photo_scan_max_colors_var.get()))),
-                "min_area": max(1, int(self.photo_scan_min_area_var.get())),
-                "noise_suppression": max(0, min(100, int(self.photo_scan_noise_var.get()))),
-                "foreground_distance": max(5, min(80, int(self.photo_scan_foreground_distance_var.get()))),
-                "weak_contrast": 0,
-                "protect_background": bool(self.photo_scan_protect_background_var.get()),
-                "object_mask_first": False,
-                "despeckle": bool(self.photo_scan_despeckle_var.get()),
-                "despeckle_min_area": max(0, min(500, int(self.photo_scan_despeckle_area_var.get()))),
-                "protect_thin_lines": True,
-                "close_lines": False,
-                "fill_small_holes": False,
-            }
+            params = self._current_photo_scan_params()
+            mode = str(params.pop("mode"))
         except Exception as exc:
             messagebox.showerror(tr("msg.error"), tr("msg.photo_scan_error", error=exc))
             return
@@ -3209,21 +3990,72 @@ class WorkflowApp(tk.Tk):
         self.set_progress(5, tr("progress.prepare_image"))
 
         result_queue = queue.Queue()
+        cancel_event = threading.Event()
         started_at = time.monotonic()
-        timeout_s = 180.0
+        # Nur als Sicherheitsnetz gegen echte Endlosschleifen. Normale lange Läufe
+        # werden nicht mehr als Benutzer-Abbruch gemeldet.
+        timeout_s = 720.0 if mode == "auto" else 360.0
 
         def worker() -> None:
             try:
                 def worker_progress(value: float, key: str) -> None:
                     result_queue.put(("progress", (value, key)))
 
-                result = recolor.RecolorApp.build_photo_scan_cleanup_image(
-                    base,
-                    **params,
-                    max_work_edge=1500,
-                    progress_callback=worker_progress,
-                    cancel_callback=lambda: bool(getattr(self, "_busy_cancel_requested", False)),
-                )
+                if mode == "auto":
+                    result = recolor.RecolorApp.build_photo_scan_auto_image(
+                        base,
+                        preference="auto",
+                        max_colors=params["max_colors"],
+                        min_area=params["min_area"],
+                        preserve_color_accents=params.get("preserve_color_accents", False),
+                        max_work_edge=760,
+                        progress_callback=worker_progress,
+                        cancel_callback=lambda: cancel_event.is_set() or bool(getattr(self, "_busy_cancel_requested", False)),
+                    )
+                elif mode == "bw":
+                    result = recolor.RecolorApp.build_photo_scan_black_white_image(
+                        base,
+                        min_area=params["min_area"],
+                        noise_suppression=params["noise_suppression"],
+                        foreground_distance=params["foreground_distance"],
+                        weak_contrast=params["weak_contrast"],
+                        protect_background=params["protect_background"],
+                        protect_thin_lines=params["protect_thin_lines"],
+                        close_lines=params["close_lines"],
+                        fill_small_holes=params["fill_small_holes"],
+                        preserve_color_accents=params["preserve_color_accents"],
+                        max_work_edge=1300,
+                        progress_callback=worker_progress,
+                        cancel_callback=lambda: cancel_event.is_set() or bool(getattr(self, "_busy_cancel_requested", False)),
+                    )
+                elif mode == "faded":
+                    result = recolor.RecolorApp.build_photo_scan_faded_print_image(
+                        base,
+                        min_area=params["min_area"],
+                        noise_suppression=params["noise_suppression"],
+                        weak_contrast=params["weak_contrast"],
+                        close_lines=params["close_lines"],
+                        max_work_edge=1300,
+                        progress_callback=worker_progress,
+                        cancel_callback=lambda: cancel_event.is_set() or bool(getattr(self, "_busy_cancel_requested", False)),
+                    )
+                else:
+                    # Farbig/Detail sind technisch teurer als Schwarz/Weiß. Begrenzte
+                    # Arbeitsgröße verhindert scheinbares Hängen bei großen Scans.
+                    if mode == "color":
+                        work_edge = 820
+                    elif mode == "detail":
+                        work_edge = 1050
+                    else:
+                        work_edge = 1100
+                    result = recolor.RecolorApp.build_photo_scan_cleanup_image(
+                        base,
+                        **params,
+                        max_work_edge=work_edge,
+                        progress_callback=worker_progress,
+                        cancel_callback=lambda: cancel_event.is_set() or bool(getattr(self, "_busy_cancel_requested", False)),
+                    )
+                    result.variant = mode
                 result_queue.put(("result", result))
             except InterruptedError:
                 result_queue.put(("cancelled", None))
@@ -3238,20 +4070,65 @@ class WorkflowApp(tk.Tk):
                     kind, payload = result_queue.get_nowait()
                     if kind == "progress":
                         value, key = payload
-                        self.set_progress(float(value), tr(str(key)))
+                        raw_key = str(key)
+                        if raw_key.startswith("progress.photo_scan_auto_candidate_step|"):
+                            parts = raw_key.split("|", 4)
+                            try:
+                                inner_key = parts[4] if len(parts) > 4 else ""
+                                inner_text = tr(inner_key, default=inner_key)
+                                status_text = tr(
+                                    "progress.photo_scan_auto_candidate",
+                                    index=int(parts[1]),
+                                    total=int(parts[2]),
+                                    variant=tr(f"step1.photo_scan_mode_{parts[3]}", default=parts[3]),
+                                )
+                                if inner_text:
+                                    status_text = f"{status_text} {inner_text}"
+                            except Exception:
+                                status_text = raw_key
+                        elif raw_key.startswith("progress.photo_scan_auto_candidate|"):
+                            parts = raw_key.split("|", 3)
+                            try:
+                                status_text = tr(
+                                    "progress.photo_scan_auto_candidate",
+                                    index=int(parts[1]),
+                                    total=int(parts[2]),
+                                    variant=tr(f"step1.photo_scan_mode_{parts[3]}", default=parts[3]),
+                                )
+                            except Exception:
+                                status_text = raw_key
+                        else:
+                            status_text = tr(raw_key, default=raw_key)
+                        self.set_progress(float(value), status_text)
                     elif kind == "result":
                         result = payload
                         self.set_progress(92, tr("progress.render_preview"))
                         self.special_result_image = result.image
                         self.special_result_mode = "photo_scan"
                         self.edited_image = self.special_result_image.copy()
-                        self.step1_edited_canvas.set_image(self.edited_image, reset_view=False)
+                        # Bei großen Scans war der letzte Schritt oft nicht die Analyse,
+                        # sondern das Rendern der Tk-Vorschau. Deshalb hier bewusst auf
+                        # Fit-to-canvas zurücksetzen und die maximale Vorschaufläche
+                        # begrenzen, statt mit einem alten Zoomfaktor riesige Bilder zu rendern.
+                        try:
+                            self.step1_edited_canvas._max_display_pixels = min(
+                                int(getattr(self.step1_edited_canvas, "_max_display_pixels", 8_000_000)),
+                                8_000_000,
+                            )
+                        except Exception:
+                            pass
+                        self.step1_edited_canvas.set_image(self.edited_image, reset_view=True)
+                        variant = tr(f"step1.photo_scan_mode_{getattr(result, 'variant', '')}", default=getattr(result, "variant", ""))
+                        if not variant:
+                            variant = tr(f"step1.photo_scan_mode_{mode}", default=mode)
                         self.photo_scan_status_var.set(
                             tr(
                                 "status.photo_scan_done",
                                 count=len(result.detected),
                                 score=result.analysis.score,
                                 noise=result.analysis.background_noise,
+                                variant=variant,
+                                tech=getattr(result, "technical_score", 0.0),
                             )
                         )
                         self.status_var.set(self.photo_scan_status_var.get())
@@ -3259,10 +4136,10 @@ class WorkflowApp(tk.Tk):
                         total_pixels = max(1, result.image.size[0] * result.image.size[1])
                         detected_ratio = detected_pixels / total_pixels
                         if (
-                            result.analysis.score >= 5
-                            or result.analysis.small_specks >= 500
-                            or result.analysis.color_complexity >= 140
-                            or detected_ratio < 0.01
+                            result.analysis.score >= 6
+                            or result.analysis.small_specks >= 700
+                            or result.analysis.color_complexity >= 190
+                            or detected_ratio < 0.006
                             or len(result.detected) <= 0
                         ):
                             self.show_problem_image_hint(tr("status.problem_hint_shown"))
@@ -3287,8 +4164,12 @@ class WorkflowApp(tk.Tk):
                 pass
 
             if time.monotonic() - started_at > timeout_s:
-                self.request_busy_cancel()
-                self.set_progress(0, tr("status.analysis_cancel_requested"))
+                cancel_event.set()
+                self.set_progress(0, tr("msg.photo_scan_timeout"))
+                if show_busy:
+                    self.close_busy_dialog()
+                messagebox.showerror(tr("msg.error"), tr("msg.photo_scan_timeout"))
+                return
             self.after(80, poll_worker)
 
         self.after(80, poll_worker)
@@ -3322,6 +4203,67 @@ class WorkflowApp(tk.Tk):
             self.status_var.set(tr("status.intermediate_saved", path=path))
         except Exception as exc:
             messagebox.showerror(tr("msg.export_error"), str(exc))
+
+    def use_current_preview_as_new_base(self, show_message: bool = False) -> bool:
+        """Übernimmt die aktuelle Step-1-Vorschau als neue Arbeitsgrundlage.
+
+        Das ist bewusst etwas anderes als ``use_edited_for_vector``:
+        - diese Methode bleibt in Schritt 1
+        - das aktuelle bearbeitete Bild wird zum neuen Original
+        - Vorbereitungswerte werden neutralisiert, damit sie nicht doppelt wirken
+        - danach kann in einem anderen Reiter weitergearbeitet werden
+        """
+        self.update_step1_preview()
+        if self.edited_image is None:
+            messagebox.showwarning(tr("msg.no_image_title"), tr("msg.no_image_edit"))
+            return False
+
+        new_base = _flatten_rgba_to_rgb(self.edited_image).convert("RGBA")
+        self.original_image = new_base.copy()
+        self.prepared_image = None
+        self.special_result_image = None
+        self.special_result_mode = None
+        self.edited_image = new_base.copy()
+        new_base_rgb = np.array(_flatten_rgba_to_rgb(new_base))
+        self._perfect_bw_source = (
+            self._is_perfect_black_white_array(new_base_rgb)
+            or self._is_high_contrast_black_white_array(new_base_rgb)
+        )
+
+        # Die Vorschau ist jetzt die neue Quelle. Alle globalen Vorbereitungswerte
+        # werden zurückgesetzt, damit Helligkeit/Kontrast/Rotation nicht doppelt
+        # auf das bereits erzeugte Zwischenbild angewendet werden.
+        try:
+            self.prep_brightness_var.set(0)
+            self.prep_contrast_var.set(0)
+            self.prep_black_var.set(0)
+            self.prep_white_var.set(255)
+            self.prep_gamma_var.set(1.0)
+            self.prep_rotation_var.set(0.0)
+        except Exception:
+            pass
+        if self.preview_after_id:
+            try:
+                self.after_cancel(self.preview_after_id)
+            except Exception:
+                pass
+            self.preview_after_id = None
+
+        # Automatisch erkannte Farbreihen gehören zum alten Ausgangsbild und werden
+        # deshalb geleert. Manuelle Zeilen bleiben bewusst erhalten, falls der Nutzer
+        # danach direkt weiter umfärben möchte.
+        try:
+            self.clear_basic_rows()
+        except Exception:
+            pass
+
+        self.photo_scan_status_var.set("")
+        self.step1_original_canvas.set_image(self.original_image, reset_view=False)
+        self.step1_edited_canvas.set_image(self.edited_image, reset_view=False)
+        self.status_var.set(tr("status.preview_base_ready"))
+        if show_message:
+            messagebox.showinfo(tr("msg.preview_base_title"), tr("msg.preview_base_body"))
+        return True
 
     def use_edited_for_vector(self, show_message: bool = False) -> bool:
         self.update_step1_preview()
@@ -3397,6 +4339,27 @@ class WorkflowApp(tk.Tk):
         white = (channel_spread <= 2) & (gray >= 253)
         covered = float((black | white).mean())
         return covered >= 0.995 and bool(black.any()) and bool(white.any())
+
+    @staticmethod
+    def _is_high_contrast_black_white_array(image_rgb: np.ndarray) -> bool:
+        """Erkennt bereits brauchbare S/W- oder Lineart-Vorlagen mit Antialiasing.
+
+        Die strenge Prüfung oben erkennt nur echte 0/255-Pixel. Viele gute
+        Vorlagen haben aber leichte Graukanten oder minimale Kompressionsreste.
+        Solche Bilder sollen nicht erst durch Logo-Maske/Foto-Scan laufen,
+        sondern direkt 1:1 übernommen werden können.
+        """
+        if image_rgb is None or image_rgb.size == 0:
+            return False
+        stats = WorkflowApp._bw_stats_from_array(image_rgb)
+        return (
+            stats["near_bw"] >= 0.985
+            and stats["colored"] <= 0.005
+            and stats["dynamic"] >= 170.0
+            and stats["near_black"] >= 0.001
+            and stats["near_white"] >= 0.050
+            and (stats["near_black"] + stats["near_white"]) >= 0.550
+        )
 
     @staticmethod
     def _bw_stats_from_array(image_rgb: np.ndarray) -> dict[str, float]:
@@ -3518,11 +4481,11 @@ class WorkflowApp(tk.Tk):
 
         aggregated: dict[RGB, list[float]] = {}
         try:
-            mode = self.step1_notebook.index(self.step1_notebook.select())
+            selected_tab = self.nametowidget(self.step1_notebook.select())
         except Exception:
-            mode = 0
+            selected_tab = None
 
-        if mode == 0 and self.basic_rows:
+        if selected_tab is self.basic_tab and self.basic_rows:
             for row in self.basic_rows:
                 try:
                     if not row.enabled_var.get():
@@ -3536,7 +4499,7 @@ class WorkflowApp(tk.Tk):
                 entry[0] += pixels
                 entry[1] += percent
 
-        if mode == 1 and not aggregated and self.manual_rows:
+        if selected_tab is self.manual_tab and not aggregated and self.manual_rows:
             for row in self.manual_rows:
                 try:
                     if not row.enabled_var.get():
@@ -3828,6 +4791,15 @@ class WorkflowApp(tk.Tk):
     def _schedule_live_preview_if_enabled(self, *_args: object) -> None:
         if self._suspend_live_preview:
             return
+        # Die Punkt-/Linienanzeige ist eine reine technische Prognose und soll
+        # auch dann aktualisiert werden, wenn die große Vorschau nicht live neu
+        # berechnet wird. Dadurch sieht man sofort, ob Epsilon, Ankerpunkt-
+        # Bereinigung oder Doppellinien-Cleanup die Exportdaten verändert.
+        if self.vector_image_rgb is not None and self.detected_contours:
+            try:
+                self._update_cad_point_count()
+            except Exception:
+                pass
         if not self.live_preview_var.get():
             return
         if self.vector_image_rgb is None:
@@ -3844,10 +4816,110 @@ class WorkflowApp(tk.Tk):
                 pass
         self.step2_live_after_id = self.after(280, lambda: self.detect_and_preview_vector(live=True))
 
+    def _clone_contour_with_points_for_count(self, contour: Any, points: list[Tuple[float, float]]) -> Any:
+        """Erzeugt eine leichte Kontur-Kopie für technische Zählungen.
+
+        Die eigentlichen erkannten Konturen bleiben unverändert. Dadurch kann die
+        Punkt-/Linienanzeige live berechnet werden, ohne sofort das reale
+        Vektorergebnis oder die Vorschaupfade umzuschreiben.
+        """
+        return vector.DetectedContour(
+            contour.rule,
+            list(points),
+            float(getattr(contour, "area", 0.0) or 0.0),
+            bool(getattr(contour, "closed", True)),
+            bool(getattr(contour, "is_hole", False)),
+            list(getattr(contour, "raw_points", None) or getattr(contour, "points", []) or []),
+        )
+
+    def _estimated_export_contours_for_current_cad_settings(self) -> List[Any]:
+        """Berechnet eine nicht-destruktive Export-Prognose für die Anzeige.
+
+        Berücksichtigt werden hier vor allem die letzten CAD-/Vorexport-
+        Einstellungen: globale CAD-Abweichung, nahe Ankerpunkte und die daraus
+        entstehende Punktzahl. Doppellinien werden anschließend als Linien-
+        Segmente gezählt, weil sie nicht die Punktzahl eines Pfads verändern,
+        sondern die exportierten CAD-Segmente reduzieren.
+        """
+        if not self.detected_contours:
+            return []
+        try:
+            epsilon = max(0.0, float(str(self.global_epsilon_var.get()).replace(",", ".")))
+        except Exception:
+            epsilon = 0.0
+        estimated: List[Any] = []
+        for item in self.detected_contours:
+            raw_points = getattr(item, "raw_points", None) or getattr(item, "points", []) or []
+            points = [(float(x), float(y)) for x, y in raw_points]
+            if epsilon > 0.0 and len(points) >= 2:
+                try:
+                    points = vector.approximate_points(points, epsilon, closed=bool(getattr(item, "closed", True)))
+                except Exception:
+                    points = [(float(x), float(y)) for x, y in getattr(item, "points", []) or []]
+            estimated.append(self._clone_contour_with_points_for_count(item, points))
+        try:
+            if self.remove_loose_points_var.get() and self.get_anchor_neighbor_distance_px() > 0.0:
+                estimated = vector.remove_neighbor_anchor_points_from_contours(
+                    estimated,
+                    min_distance_px=self.get_anchor_neighbor_distance_px(),
+                )
+        except Exception:
+            pass
+        return estimated
+
+    def _count_export_segments_for_display(self, contours: List[Any]) -> tuple[int, int]:
+        """Zählt CAD-Segmente vor und nach optionalem Doppellinien-Cleanup."""
+        if not contours:
+            return 0, 0
+        try:
+            segment_count = vector.count_export_line_segments(contours)
+        except Exception:
+            segment_count = 0
+        unique_count = segment_count
+        if self.unique_cad_lines_var.get():
+            try:
+                unique_count = len(
+                    vector.unique_line_segments_from_contours(
+                        contours,
+                        tolerance_px=self.get_duplicate_line_tolerance_px(),
+                    )
+                )
+            except Exception:
+                unique_count = segment_count
+        return int(segment_count), int(unique_count)
+
     def _update_cad_point_count(self) -> None:
-        raw_points = sum(len(c.raw_points or c.points) for c in self.detected_contours if c.rule.export)
-        final_points = sum(len(c.points) for c in self.detected_contours if c.rule.export)
-        self.cad_point_count_var.set(tr("status.cad_points", before=raw_points, after=final_points))
+        """Aktualisiert die technische Punkt-/Linienanzeige für Schritt 2.
+
+        Die Punktzahl beschreibt die Polylines nach der aktuellen CAD-
+        Vereinfachung. Doppellinien-Cleanup verändert dagegen primär die Anzahl
+        der exportierten CAD-Liniensegmente; deshalb wird dieser Wert separat
+        angezeigt.
+        """
+        if not self.detected_contours:
+            self.cad_point_count_var.set("")
+            return
+        raw_points = sum(len(getattr(c, "raw_points", None) or getattr(c, "points", []) or []) for c in self.detected_contours if c.rule.export)
+        current_points = sum(len(getattr(c, "points", []) or []) for c in self.detected_contours if c.rule.export)
+        estimated_contours = self._estimated_export_contours_for_current_cad_settings()
+        estimated_points = sum(len(getattr(c, "points", []) or []) for c in estimated_contours if c.rule.export)
+        segments_before, segments_after = self._count_export_segments_for_display(estimated_contours)
+        if self.unique_cad_lines_var.get():
+            self.cad_point_count_var.set(
+                f"Punkte: {raw_points} → {estimated_points} | CAD-Linien: {segments_before} → {segments_after}"
+            )
+        else:
+            # Wenn die Prognose der aktuellen realen Kontur entspricht, reicht die
+            # gewohnte kurze Anzeige. Bei geänderter CAD-Abweichung wird die
+            # erwartete Export-Punktzahl zusätzlich sichtbar.
+            if estimated_points != current_points:
+                self.cad_point_count_var.set(
+                    f"Punkte: {raw_points} → {estimated_points} | aktuell {current_points} | CAD-Linien: {segments_before}"
+                )
+            else:
+                self.cad_point_count_var.set(
+                    f"Punkte: {raw_points} → {current_points} | CAD-Linien: {segments_before}"
+                )
 
     def _set_all_vector_epsilons(self, epsilon: float) -> None:
         value = f"{max(0.0, float(epsilon)):.2f}"
@@ -4133,6 +5205,26 @@ class WorkflowApp(tk.Tk):
                         outline=(17, 17, 17),
                     )
 
+        def draw_dialog_path_lines(image: Image.Image, contours: List[Any]) -> None:
+            """Zeichnet die echten Verbindungslinien zusätzlich unter die Ankerpunkte.
+
+            Die Objektvorschau zeigt viele Strukturen als gefüllte Masken. Im
+            Vereinfachungsdialog ist aber wichtig zu sehen, ob Punkte wirklich
+            innerhalb desselben Pfades verbunden sind. Deshalb wird hier eine
+            klare schwarze Pfadlinie mit hellem Unterzug gezeichnet, bevor die
+            gelben Ankerpunkte darübergelegt werden.
+            """
+            draw = ImageDraw.Draw(image)
+            for item in contours:
+                if not getattr(item.rule, "export", True):
+                    continue
+                points = [(float(x), float(y)) for x, y in (getattr(item, "points", []) or [])]
+                if len(points) < 2:
+                    continue
+                line = points + [points[0]] if bool(getattr(item, "closed", False)) and len(points) >= 3 else points
+                draw.line(line, fill=(255, 255, 255), width=4, joint="curve")
+                draw.line(line, fill=(0, 0, 0), width=2, joint="curve")
+
         def preview_image_for(contours: List[Any]) -> Image.Image:
             original = self.detected_contours
             original_selected = self.selected_contour_indices
@@ -4142,6 +5234,7 @@ class WorkflowApp(tk.Tk):
                 self.selected_contour_indices = set()
                 self.selected_contour_index = None
                 image = self.build_object_check_preview_image()
+                draw_dialog_path_lines(image, contours)
                 draw_dialog_anchor_points(image, contours)
                 return image
             finally:
@@ -4395,19 +5488,14 @@ class WorkflowApp(tk.Tk):
             self.vector_bbox_info_var.set("")
             return
         _x, _y, width_px, height_px = bbox
+        text = f"{width_px:.0f} x {height_px:.0f} px"
         try:
             pixel_to_mm = self.get_pixel_to_mm()
         except Exception:
             pixel_to_mm = 0.0
-        if pixel_to_mm <= 0.0:
-            pixel_to_mm = 1.0
-        width_mm = width_px * pixel_to_mm
-        height_mm = height_px * pixel_to_mm
-        self.vector_bbox_info_var.set("\n".join((
-            tr("step2.bbox_px_line", width_px=width_px, height_px=height_px),
-            tr("step2.scale_line", pixel_to_mm=pixel_to_mm),
-            tr("step2.export_size_line", width_mm=width_mm, height_mm=height_mm),
-        )))
+        if pixel_to_mm > 0.0:
+            text += f" | {width_px * pixel_to_mm:.3f} x {height_px * pixel_to_mm:.3f} mm"
+        self.vector_bbox_info_var.set(text)
 
     def apply_target_size_to_scale(self) -> None:
         bbox = self.get_vector_bbox_px()
