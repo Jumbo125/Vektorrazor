@@ -5,12 +5,21 @@
 
 """Ausgelagerte Dialoge für Skalieren/Export und STL-Extrusion.
 
-Der Dialog wurde bewusst ohne Funktionsänderung aus workflow_app.py herausgelöst.
-Die WorkflowApp-Instanz wird als ``app`` übergeben; dadurch bleiben bestehende
-Variablen, Vorschau-Methoden und i18n-Anbindung erhalten.
+Diese Datei sammelt Dialogfenster, die nicht zum permanent sichtbaren
+Hauptlayout gehören, aber im Arbeitsablauf regelmäßig gebraucht werden.
+Dazu zählen insbesondere Export- und Skalierungsdialoge sowie Optionen rund um
+3D-/STL-nahe Ausgaben.
+
+Die Dialoge werden absichtlich separat gehalten, damit workflow_app.py nicht
+mit langem Dialog-UI-Code überfrachtet wird. Die WorkflowApp-Instanz wird als
+``app`` übergeben, sodass bestehende Zustände, Vorschaubilder und Einstellungen
+weiterverwendet werden können.
 """
 
 from __future__ import annotations
+
+# Dialog-Code ist absichtlich ausgelagert, damit die Hauptdatei auf die
+# Ablaufsteuerung fokussiert bleibt und Exportfenster separat pflegbar sind.
 
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
