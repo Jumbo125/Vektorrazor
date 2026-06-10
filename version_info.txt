@@ -5,8 +5,8 @@
 
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(0, 1, 0, 0),
-    prodvers=(0, 1, 0, 0),
+    filevers=(0, 2, 1, 0),
+    prodvers=(0, 2, 1, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -21,12 +21,12 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'Andreas Rottmann'),
           StringStruct('FileDescription', 'Vektorrazor - PNG logo to CAD-oriented vector contours'),
-          StringStruct('FileVersion', '0.1.0'),
+          StringStruct('FileVersion', '0.2.1'),
           StringStruct('InternalName', 'Vektorrazor'),
           StringStruct('LegalCopyright', 'Copyright (C) 2026 Andreas Rottmann'),
           StringStruct('OriginalFilename', 'Vektorrazor.exe'),
           StringStruct('ProductName', 'Vektorrazor'),
-          StringStruct('ProductVersion', '0.1.0')
+          StringStruct('ProductVersion', '0.2.1')
         ]
       )
     ]),
