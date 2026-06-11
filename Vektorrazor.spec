@@ -1,12 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_submodules
+
+hiddenimports = ['PIL._tkinter_finder', 'PIL.ImageTk']
+hiddenimports += collect_submodules('PIL')
 
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets/vektorrazor.ico', 'assets'), ('assets/vektorrazor_icon.png', 'assets')],
-    hiddenimports=[],
+    datas=[('assets/vektorrazor_icon.png', 'assets'), ('assets/vektorrazor.ico', 'assets')],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

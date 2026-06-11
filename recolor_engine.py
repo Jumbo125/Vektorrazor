@@ -231,6 +231,7 @@ class ZoomImageCanvas(ttk.Frame):
         title: str,
         picker_callback: Optional[Callable[[RGB, int, int], None]] = None,
         zoom_callback: Optional[Callable[[float], None]] = None,
+        view_callback: Optional[Callable[["ZoomImageCanvas"], None]] = None,
         overlay_draw_callback: Optional[Callable[["ZoomImageCanvas"], None]] = None,
         mousewheel_zoom_enabled: bool = True,
         fast_pan: bool = False,
@@ -238,6 +239,7 @@ class ZoomImageCanvas(ttk.Frame):
         super().__init__(parent)
         self.picker_callback = picker_callback
         self.zoom_callback = zoom_callback
+        self.view_callback = view_callback
         self.overlay_draw_callback = overlay_draw_callback
         # Schritt 2 kann sehr große technische Raster- und Vektorvorschauen anzeigen.
         # Dort ist Mausrad-Zoom teuer, weil jeder Tick ein neues PIL/Tk-Bild erzeugt.
@@ -257,7 +259,10 @@ class ZoomImageCanvas(ttk.Frame):
         self._max_display_pixels = 30_000_000
         self._render_after_id: Optional[str] = None
 
-        ttk.Label(self, text=title, font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=4, pady=(0, 4))
+        self.header_frame = ttk.Frame(self)
+        self.header_frame.pack(fill="x", padx=4, pady=(0, 4))
+        self.title_label = ttk.Label(self.header_frame, text=title, font=("Segoe UI", 10, "bold"))
+        self.title_label.pack(side="left")
         self.canvas = tk.Canvas(self, bg="#303030", highlightthickness=1, highlightbackground="#808080")
         self.canvas.pack(fill="both", expand=True)
 
@@ -324,12 +329,21 @@ class ZoomImageCanvas(ttk.Frame):
         self.offset_y = (ch - ih * self.zoom) / 2
         self.render()
         self._notify_zoom_changed()
+        self._notify_view_changed()
 
     def _notify_zoom_changed(self) -> None:
         if self.zoom_callback is None:
             return
         try:
             self.zoom_callback(float(self.zoom))
+        except Exception:
+            pass
+
+    def _notify_view_changed(self) -> None:
+        if self.view_callback is None:
+            return
+        try:
+            self.view_callback(self)
         except Exception:
             pass
 
@@ -365,6 +379,7 @@ class ZoomImageCanvas(ttk.Frame):
         else:
             self.render()
         self._notify_zoom_changed()
+        self._notify_view_changed()
 
     def _safe_zoom(self, requested_zoom: float) -> float:
         if self.image is None:
@@ -449,6 +464,7 @@ class ZoomImageCanvas(ttk.Frame):
         self.offset_y = event.y - img_y * new_zoom
         self.schedule_render()
         self._notify_zoom_changed()
+        self._notify_view_changed()
         return "break"
 
     def _pick_pixel_at_canvas_pos(self, canvas_x: int, canvas_y: int) -> None:
@@ -479,6 +495,7 @@ class ZoomImageCanvas(ttk.Frame):
             self.schedule_render(35)
         else:
             self.render()
+        self._notify_view_changed()
 
     def _end_left_action(self, event: tk.Event) -> None:
         if self._left_press is None:
@@ -494,6 +511,7 @@ class ZoomImageCanvas(ttk.Frame):
             # Nach dem Loslassen einmal final rendern, damit die Vorschau exakt
             # am letzten Offset liegt, auch wenn während des Ziehens gedrosselt wurde.
             self.render()
+        self._notify_view_changed()
 
     def _start_pan(self, event: tk.Event) -> None:
         self._pan_start = (event.x, event.y, self.offset_x, self.offset_y)
@@ -508,6 +526,7 @@ class ZoomImageCanvas(ttk.Frame):
             self.schedule_render(35)
         else:
             self.render()
+        self._notify_view_changed()
 
 
 # -----------------------------------------------------------------------------

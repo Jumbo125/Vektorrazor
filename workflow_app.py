@@ -52,6 +52,7 @@ from tkinter import ttk, filedialog, messagebox, colorchooser
 import numpy as np
 from PIL import Image, ImageTk, ImageDraw, ImageFilter
 
+import ai_upscale
 import recolor_engine as recolor
 import vector_engine as vector
 import dialogs_scale_export
@@ -490,6 +491,18 @@ class WorkflowApp(tk.Tk):
         self.eraser_color_var = tk.StringVar(value="255,255,255")
         self.eraser_status_var = tk.StringVar(value=tr("step1.eraser_status_idle"))
         self._eraser_last_xy: Optional[Tuple[int, int]] = None
+        self.ai_upscale_model_var = tk.StringVar()
+        self.ai_upscale_unit_var = tk.StringVar(value="px")
+        self.ai_upscale_width_var = tk.StringVar()
+        self.ai_upscale_height_var = tk.StringVar()
+        self.ai_upscale_keep_aspect_var = tk.BooleanVar(value=True)
+        self.ai_upscale_aspect_master_var = tk.StringVar(value="width")
+        self.ai_upscale_output_var = tk.StringVar()
+        self.ai_upscale_original_size_var = tk.StringVar(value="Originalbildgröße: -")
+        self.step1_sync_view_var = tk.BooleanVar(value=False)
+        self.step2_sync_view_var = tk.BooleanVar(value=False)
+        self._syncing_step1_view = False
+        self._syncing_step2_view = False
 
         # Schritt 2 Variablen
         self.vector_image_rgb: Optional[np.ndarray] = None
@@ -663,6 +676,76 @@ class WorkflowApp(tk.Tk):
         self._write_user_config(config)
         return config
 
+    def _default_ai_upscale_models_dir(self) -> Optional[Path]:
+        models_dir = ai_upscale.AiUpscalePaths(self.user_config_dir).models_dir
+        return models_dir if models_dir.is_dir() else None
+
+    def _default_ai_upscale_model_file(self) -> Optional[Path]:
+        return ai_upscale.AiUpscalePaths(self.user_config_dir).default_model_file()
+
+    def _default_ai_upscale_output_path(self) -> Path:
+        return ai_upscale.AiUpscalePaths(self.user_config_dir).default_output_path()
+
+    def _ensure_ai_upscale_defaults(self) -> None:
+        self._update_ai_upscale_original_size_label()
+        if not self.ai_upscale_model_var.get().strip():
+            default_model = self._default_ai_upscale_model_file()
+            if default_model is not None:
+                self.ai_upscale_model_var.set(str(default_model))
+        if not self.ai_upscale_output_var.get().strip():
+            self.ai_upscale_output_var.set(str(self._default_ai_upscale_output_path()))
+        if self.original_image is not None:
+            width_val = str(self.ai_upscale_width_var.get()).strip()
+            height_val = str(self.ai_upscale_height_var.get()).strip()
+            if not width_val and not height_val:
+                base = self.get_prepared_image(force=False)
+                if base is not None:
+                    self.ai_upscale_width_var.set(str(max(64, base.width * 2)))
+                    self.ai_upscale_height_var.set(str(max(64, base.height * 2)))
+        self.update_ai_upscale_dimension_edit_state()
+
+    def _update_ai_upscale_original_size_label(self) -> None:
+        if self.original_image is None:
+            self.ai_upscale_original_size_var.set("Originalbildgröße: -")
+            return
+        self.ai_upscale_original_size_var.set(
+            f"Originalbildgröße: {self.original_image.width} x {self.original_image.height} px"
+        )
+
+    def update_ai_upscale_dimension_edit_state(self) -> None:
+        width_entry = getattr(self, "ai_upscale_width_entry", None)
+        height_entry = getattr(self, "ai_upscale_height_entry", None)
+        master_row = getattr(self, "ai_upscale_master_frame", None)
+        if width_entry is None or height_entry is None:
+            return
+        keep_aspect = bool(self.ai_upscale_keep_aspect_var.get())
+        master = str(self.ai_upscale_aspect_master_var.get() or "width")
+        if master not in {"width", "height"}:
+            master = "width"
+            self.ai_upscale_aspect_master_var.set(master)
+        if master_row is not None:
+            if keep_aspect:
+                master_row.grid()
+            else:
+                master_row.grid_remove()
+        if keep_aspect:
+            width_entry.configure(state="normal" if master == "width" else "disabled")
+            height_entry.configure(state="normal" if master == "height" else "disabled")
+        else:
+            width_entry.configure(state="normal")
+            height_entry.configure(state="normal")
+
+    def _run_ai_upscale(self, base: Image.Image, width: int, height: int, progress_callback=None) -> Path:
+        return ai_upscale.run_ai_upscale(
+            base=base,
+            width=width,
+            height=height,
+            model_path=Path(self.ai_upscale_model_var.get().strip()),
+            output_path=Path(self.ai_upscale_output_var.get().strip() or self._default_ai_upscale_output_path()),
+            paths=ai_upscale.AiUpscalePaths(self.user_config_dir),
+            progress_callback=progress_callback,
+        )
+
     def _write_json_atomic(self, path: Path, data: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_name(f".{path.name}.tmp")
@@ -738,6 +821,13 @@ class WorkflowApp(tk.Tk):
         version = str(export_config.get("dxf_version", "R2000"))
         self.dxf_version_var.set(_dxf_choice_for_version(version))
         self.live_preview_var.set(bool(export_config.get("live_preview", True)))
+        paths_config = self.user_config.get("paths", {})
+        ai_model = str(paths_config.get("ai_upscale_model", ""))
+        if ai_model:
+            self.ai_upscale_model_var.set(ai_model)
+        ai_output = str(paths_config.get("ai_upscale_output", ""))
+        if ai_output:
+            self.ai_upscale_output_var.set(ai_output)
 
     def _bind_user_config_traces(self) -> None:
         for var in (
@@ -784,6 +874,12 @@ class WorkflowApp(tk.Tk):
         if output_path:
             config["paths"]["output_path"] = output_path
             config["paths"]["output_dir"] = str(Path(output_path).expanduser().parent)
+        ai_model_path = self.ai_upscale_model_var.get().strip()
+        if ai_model_path:
+            config["paths"]["ai_upscale_model"] = ai_model_path
+        ai_output_path = self.ai_upscale_output_var.get().strip()
+        if ai_output_path:
+            config["paths"]["ai_upscale_output"] = ai_output_path
 
         self.user_config = config
         self._write_user_config(config)
@@ -830,9 +926,10 @@ class WorkflowApp(tk.Tk):
             pass
 
     def _bind_live_preview_traces(self) -> None:
-        vars_to_watch: list[tk.Variable] = [
+        # Nur Checkboxen und Comboboxen bekommen trace_add.
+        # Numerische Input-Felder und Slider werden über FocusOut/Return/ButtonRelease gebunden.
+        checkbox_and_combo_vars: list[tk.Variable] = [
             self.vector_mode_var,
-            self.centerline_merge_px_var,
             self.closed_paths_only_var,
             self.fill_closed_shapes_var,
             self.group_connected_paths_var,
@@ -841,31 +938,15 @@ class WorkflowApp(tk.Tk):
             self.preview_mode_var,
             self.use_bezier_var,
             self.unique_cad_lines_var,
-            self.duplicate_line_tolerance_var,
             self.remove_loose_points_var,
-            self.anchor_neighbor_distance_var,
             self.smooth_contours_var,
-            self.smooth_strength_var,
             self.preprocess_vector_var,
-            self.preprocess_blur_var,
-            self.preprocess_edge_var,
-            self.preprocess_noise_var,
             self.internal_scale_var,
             self.smart_smoothing_var,
-            self.smart_corner_angle_var,
-            self.smart_line_tolerance_var,
-            self.smart_curve_strength_var,
-            self.global_tolerance_var,
-            self.hole_scale_var,
             self.bridge_tabs_var,
-            self.bridge_width_mm_var,
-            self.bridge_width_percent_var,
-            self.bridge_count_var,
             self.cleanup_mode_var,
-            self.min_object_area_mm2_var,
-            self.min_object_percent_var,
         ]
-        for var in vars_to_watch:
+        for var in checkbox_and_combo_vars:
             try:
                 var.trace_add("write", self._schedule_live_preview_if_enabled)
             except Exception:
@@ -1335,6 +1416,8 @@ class WorkflowApp(tk.Tk):
     def _build_step1_photo_scan_tab(self) -> None:
         return ui_step1._build_step1_photo_scan_tab(self)
 
+    def _build_step1_ai_upscale_tab(self) -> None:
+        return ui_step1._build_step1_ai_upscale_tab(self)
 
     def _build_step2(self) -> None:
         return ui_step2._build_step2(self)
@@ -1748,6 +1831,25 @@ class WorkflowApp(tk.Tk):
                 self.step2_vector_canvas.set_zoom(rounded_zoom)
         finally:
             self._syncing_step2_zoom = False
+
+    def on_step2_canvas_view_changed(self, source_canvas) -> None:
+        if self._syncing_step2_view or not self.step2_sync_view_var.get():
+            return
+        try:
+            self._syncing_step2_view = True
+            target_canvas = self.step2_vector_canvas if source_canvas is self.step2_original_canvas else self.step2_original_canvas
+            target_canvas.zoom = float(source_canvas.zoom)
+            target_canvas.offset_x = float(source_canvas.offset_x)
+            target_canvas.offset_y = float(source_canvas.offset_y)
+            target_canvas.render()
+        except Exception:
+            pass
+        finally:
+            self._syncing_step2_view = False
+
+    def sync_step2_canvas_views_now(self) -> None:
+        if getattr(self, "step2_sync_view_var", None) is not None and self.step2_sync_view_var.get():
+            self.on_step2_canvas_view_changed(self.step2_original_canvas)
 
     def on_ui_theme_display_changed(self) -> None:
         selected = self.ui_theme_display_var.get()
@@ -2927,6 +3029,7 @@ class WorkflowApp(tk.Tk):
             self.set_progress(35, tr("progress.prepare_image"))
             self.current_path = Path(path)
             self.original_image = img
+            self._update_ai_upscale_original_size_label()
             flat_rgb = np.array(_flatten_rgba_to_rgb(img))
             self._perfect_bw_source = (
                 self._is_perfect_black_white_array(flat_rgb)
@@ -3134,6 +3237,7 @@ class WorkflowApp(tk.Tk):
 
         self.current_path = None
         self.original_image = None
+        self._update_ai_upscale_original_size_label()
         self.prepared_image = None
         self.edited_image = None
         self.special_result_image = None
@@ -3366,6 +3470,8 @@ class WorkflowApp(tk.Tk):
                 self.step1_tab_display_var.set(self._step1_mode_label(key))
             if hasattr(self, "step1_tab_hint_var"):
                 self.step1_tab_hint_var.set(self._step1_mode_hint(key))
+            if key == "ai_upscale":
+                self._ensure_ai_upscale_defaults()
             self.on_step1_mode_changed()
         except Exception:
             pass
@@ -3409,6 +3515,25 @@ class WorkflowApp(tk.Tk):
                 self.step1_edited_canvas.canvas.configure(cursor=edited_cursor)
         except Exception:
             pass
+
+    def on_step1_canvas_view_changed(self, source_canvas) -> None:
+        if self._syncing_step1_view or not self.step1_sync_view_var.get():
+            return
+        try:
+            self._syncing_step1_view = True
+            target_canvas = self.step1_edited_canvas if source_canvas is self.step1_original_canvas else self.step1_original_canvas
+            target_canvas.zoom = float(source_canvas.zoom)
+            target_canvas.offset_x = float(source_canvas.offset_x)
+            target_canvas.offset_y = float(source_canvas.offset_y)
+            target_canvas.render()
+        except Exception:
+            pass
+        finally:
+            self._syncing_step1_view = False
+
+    def sync_step1_canvas_views_now(self) -> None:
+        if getattr(self, "step1_sync_view_var", None) is not None and self.step1_sync_view_var.get():
+            self.on_step1_canvas_view_changed(self.step1_original_canvas)
 
     def clear_basic_rows(self) -> None:
         for row in self.basic_rows:
@@ -3681,6 +3806,157 @@ class WorkflowApp(tk.Tk):
             rgb = tuple(int(round(v)) for v in color[0])
             self.eraser_color_var.set(_rgb_to_text(rgb))
 
+    def choose_ai_upscale_model(self) -> None:
+        initial_dir = self._default_ai_upscale_models_dir()
+        if initial_dir is None:
+            initial_dir = Path(self._initial_dir_from_config("input"))
+        path = filedialog.askopenfilename(
+            title=tr("step1.ai_upscale_choose_model"),
+            initialdir=str(initial_dir),
+            filetypes=[("Model Files", "*.pth *.onnx *.bin *.param"), ("Alle Dateien", "*.*")],
+        )
+        if path:
+            self.ai_upscale_model_var.set(path)
+
+    def choose_ai_upscale_output(self) -> None:
+        initial = "upscaled.png"
+        if self.current_path:
+            initial = f"{self.current_path.stem}_upscaled.png"
+        path = filedialog.asksaveasfilename(
+            title=tr("step1.ai_upscale_choose_output"),
+            defaultextension=".png",
+            initialdir=self._initial_dir_from_config("output"),
+            initialfile=initial,
+            filetypes=[("PNG", "*.png")],
+        )
+        if path:
+            self.ai_upscale_output_var.set(path)
+
+    def choose_ai_scale_model(self) -> None:
+        path = filedialog.askopenfilename(
+            title=tr("step1.ai_scale_choose_model"),
+            initialdir=self._initial_dir_from_config("input"),
+            filetypes=[("Model Files", "*.pth *.onnx"), ("All Files", "*.*")],
+        )
+        if path:
+            self.ai_scale_model_var.set(path)
+
+    def choose_ai_scale_output(self) -> None:
+        initial = "scaled.png"
+        if self.current_path:
+            initial = f"{self.current_path.stem}_scaled.png"
+        path = filedialog.asksaveasfilename(
+            title=tr("step1.ai_scale_choose_output"),
+            defaultextension=".png",
+            initialdir=self._initial_dir_from_config("output"),
+            initialfile=initial,
+            filetypes=[("PNG", "*.png")],
+        )
+        if path:
+            self.ai_scale_output_var.set(path)
+
+    def create_ai_scale_preview(self) -> None:
+        messagebox.showinfo(
+            tr("step1.ai_scale_preview_title"),
+            tr("step1.ai_scale_preview_body"),
+        )
+
+    def create_ai_upscale_preview(self) -> None:
+        if self.original_image is None:
+            messagebox.showwarning(tr("msg.no_image_title"), tr("msg.no_image_load"))
+            return
+        base = self.get_prepared_image(force=True)
+        if base is None:
+            messagebox.showwarning(tr("msg.no_image_title"), tr("msg.no_image_load"))
+            return
+        width, height = self._ai_upscale_target_size(base)
+        if not self.ai_upscale_output_var.get().strip():
+            self.ai_upscale_output_var.set(str(self._default_ai_upscale_output_path()))
+        self.show_busy_dialog(tr("step1.ai_upscale_preview_title"), "KI-Skalierung läuft ...")
+        self.set_progress(2, "KI-Skalierung vorbereitet")
+
+        result_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
+
+        def worker() -> None:
+            try:
+                def worker_progress(value: float, status: str) -> None:
+                    result_queue.put(("progress", (value, status)))
+
+                out_path = self._run_ai_upscale(base, width, height, progress_callback=worker_progress)
+                result_queue.put(("result", out_path))
+            except Exception as exc:
+                result_queue.put(("error", exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        def poll_worker() -> None:
+            while True:
+                try:
+                    kind, payload = result_queue.get_nowait()
+                except queue.Empty:
+                    self.after(120, poll_worker)
+                    return
+
+                if kind == "progress":
+                    value, status = payload
+                    self.set_progress(float(value), str(status))
+                    continue
+
+                self.close_busy_dialog()
+                if kind == "error":
+                    messagebox.showerror(tr("msg.error"), str(payload))
+                    return
+                out_path = Path(payload)
+                try:
+                    with Image.open(out_path) as preview_image:
+                        result_image = preview_image.convert("RGBA")
+                except Exception as exc:
+                    messagebox.showerror(tr("msg.error"), str(exc))
+                    return
+                self.special_result_image = result_image.copy()
+                self.special_result_mode = "ai_upscale"
+                self.edited_image = result_image.copy()
+                self.step1_edited_canvas.set_image(self.edited_image, reset_view=True)
+                self.status_var.set(f"KI-Skalierung gespeichert: {out_path}")
+                messagebox.showinfo(
+                    tr("step1.ai_upscale_preview_title"),
+                    tr("step1.ai_upscale_preview_body")
+                )
+                return
+
+        self.after(120, poll_worker)
+
+    def _ai_upscale_target_size(self, image: Image.Image) -> tuple[int, int]:
+        unit = self.ai_upscale_unit_var.get()
+        width_text = str(self.ai_upscale_width_var.get()).strip().replace(",", ".")
+        height_text = str(self.ai_upscale_height_var.get()).strip().replace(",", ".")
+        if self.ai_upscale_keep_aspect_var.get():
+            master = str(self.ai_upscale_aspect_master_var.get() or "width")
+            if master == "width":
+                height_text = ""
+            else:
+                width_text = ""
+        width = None
+        height = None
+        try:
+            if unit == "percent":
+                factor = float(width_text or height_text or "200") / 100.0
+                width = max(1, int(round(image.width * factor)))
+                height = max(1, int(round(image.height * factor)))
+            else:
+                width = int(round(float(width_text))) if width_text else image.width
+                height = int(round(float(height_text))) if height_text else image.height
+        except Exception:
+            width = image.width
+            height = image.height
+        if self.ai_upscale_keep_aspect_var.get() and width > 0 and height > 0:
+            aspect = image.width / image.height if image.height else 1.0
+            if width / max(1, height) > aspect:
+                width = max(1, int(round(height * aspect)))
+            else:
+                height = max(1, int(round(width / aspect)))
+        return max(1, width), max(1, height)
+
     def prepare_eraser_from_current_preview(self) -> None:
         if self.original_image is None:
             messagebox.showwarning(tr("msg.no_image_title"), tr("msg.no_image_load"))
@@ -3756,6 +4032,11 @@ class WorkflowApp(tk.Tk):
                 mappings = self.collect_manual_mappings()
                 self.edited_image = recolor.RecolorApp.apply_mappings(self.original_image, mappings) if mappings else self.original_image.copy()
             elif selected_tab is self.photo_scan_tab:
+                base = self.get_prepared_image(force=False)
+                self.edited_image = base.copy()
+            elif selected_tab is self.ai_upscale_tab and self.special_result_mode == "ai_upscale" and self.special_result_image is not None:
+                self.edited_image = self.special_result_image.copy()
+            elif selected_tab is self.ai_upscale_tab:
                 base = self.get_prepared_image(force=False)
                 self.edited_image = base.copy()
             else:
@@ -4260,6 +4541,7 @@ class WorkflowApp(tk.Tk):
         self.photo_scan_status_var.set("")
         self.step1_original_canvas.set_image(self.original_image, reset_view=False)
         self.step1_edited_canvas.set_image(self.edited_image, reset_view=False)
+        self._update_ai_upscale_original_size_label()
         self.status_var.set(tr("status.preview_base_ready"))
         if show_message:
             messagebox.showinfo(tr("msg.preview_base_title"), tr("msg.preview_base_body"))
@@ -4791,6 +5073,9 @@ class WorkflowApp(tk.Tk):
     def _schedule_live_preview_if_enabled(self, *_args: object) -> None:
         if self._suspend_live_preview:
             return
+        # WICHTIG: Live-Vorschau nur wenn Checkbox aktiviert ist
+        if not self.live_preview_var.get():
+            return
         # Die Punkt-/Linienanzeige ist eine reine technische Prognose und soll
         # auch dann aktualisiert werden, wenn die große Vorschau nicht live neu
         # berechnet wird. Dadurch sieht man sofort, ob Epsilon, Ankerpunkt-
@@ -4800,8 +5085,6 @@ class WorkflowApp(tk.Tk):
                 self._update_cad_point_count()
             except Exception:
                 pass
-        if not self.live_preview_var.get():
-            return
         if self.vector_image_rgb is None:
             return
         if _args and str(_args[0]) == str(self.anchor_neighbor_distance_var) and not self.remove_loose_points_var.get():
@@ -6237,28 +6520,46 @@ class WorkflowApp(tk.Tk):
                     object_index += 1
             return Image.fromarray(arr, "RGB")
 
-        grouped: dict[tuple[int, int, int, str], list[Any]] = {}
-        for item in self.detected_contours:
-            if not getattr(item.rule, "export", True) or len(getattr(item, "points", []) or []) < 2:
-                continue
-            key = (int(item.rule.rgb[0]), int(item.rule.rgb[1]), int(item.rule.rgb[2]), str(item.rule.layer))
-            grouped.setdefault(key, []).append(item)
-
-        groups = list(grouped.values())
-        groups.sort(
-            key=lambda items: sum(
-                self._contour_preview_area(item)
-                for item in items
-                if not bool(getattr(item, "is_hole", False))
-            ),
-            reverse=True,
-        )
+        # Jedes Objekt einzeln nach Fläche sortieren (große zuerst, dann kleine drüber)
+        # So bleiben kleine Details sichtbar, auch wenn sie in großen Flächen liegen
+        drawable = [
+            item for item in self.detected_contours
+            if getattr(item.rule, "export", True) and len(getattr(item, "points", []) or []) >= 2
+        ]
+        drawable.sort(key=self._contour_preview_area, reverse=True)
+        
+        # Farben nach Reihenfolge des ersten Auftretens zuweisen
+        color_map: dict[tuple[int, int, int, str], int] = {}
         preview_arr = np.array(preview_hr, dtype=np.uint8)
-        for index, items in enumerate(groups):
-            mask = self._render_preview_mask_for_contours(items, w, h, aa)
-            color = np.array(palette[index % len(palette)], dtype=np.uint8)
+        
+        # Gruppierung für Löcher erstellen
+        from collections import defaultdict
+        grouped: dict[tuple[int, int, int, str], list] = defaultdict(list)
+        for item in self.detected_contours:
+            if getattr(item.rule, "export", True):
+                key = (int(item.rule.rgb[0]), int(item.rule.rgb[1]), int(item.rule.rgb[2]), str(item.rule.layer))
+                grouped[key].append(item)
+        
+        # PASS 1: Alle Farbfüllungen zeichnen (große zuerst, kleine drüber)
+        for item in drawable:
+            if bool(getattr(item, "is_hole", False)):
+                continue  # Löcher werden später separat gezeichnet
+            key = (int(item.rule.rgb[0]), int(item.rule.rgb[1]), int(item.rule.rgb[2]), str(item.rule.layer))
+            if key not in color_map:
+                color_map[key] = len(color_map)
+            color_index = color_map[key]
+            
+            mask = self._render_preview_mask_for_contours([item], w, h, aa)
+            color = np.array(palette[color_index % len(palette)], dtype=np.uint8)
             preview_arr[mask > 0] = color
-            kernel = np.ones((max(1, aa), max(1, aa)), dtype=np.uint8)
+        
+        # PASS 2: Alle schwarzen Konturen zeichnen (große zuerst, kleine drüber)
+        # Dadurch übermalen die Konturen großer Objekte nicht die Füllungen kleiner Objekte
+        kernel = np.ones((max(1, aa), max(1, aa)), dtype=np.uint8)
+        for item in drawable:
+            if bool(getattr(item, "is_hole", False)):
+                continue
+            mask = self._render_preview_mask_for_contours([item], w, h, aa)
             outline_mask = vector.cv2.morphologyEx(mask, vector.cv2.MORPH_GRADIENT, kernel)
             preview_arr[outline_mask > 0] = np.array((0, 0, 0), dtype=np.uint8)
 

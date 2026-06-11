@@ -21,6 +21,7 @@ Inhaltlich deckt Schritt 1 ab:
 - Radierer- und Bereinigungswerkzeuge
 - Logo-Masken-Modus
 - Foto-Scan-Modus
+- KI-Skalierung
 - Abschlussleiste zum Speichern und Weitergeben an Schritt 2
 """
 
@@ -169,10 +170,26 @@ def _build_step1(self) -> None:
         rotate_right_btn = ttk.Button(rotation_bar, text=tr("step1.rotate_right"), command=lambda: self.rotate_step1_image(90))
         rotate_right_btn.pack(side="left")
         self._register_i18n(rotate_right_btn, "text", "step1.rotate_right")
+
         preview_panes = ttk.Panedwindow(preview, orient=tk.HORIZONTAL)
         preview_panes.grid(row=1, column=0, sticky="nsew")
-        self.step1_original_canvas = recolor.ZoomImageCanvas(preview_panes, "Original", self.on_pick_color)
-        self.step1_edited_canvas = recolor.ZoomImageCanvas(preview_panes, "Bearbeitet / technische Zwischenstufe")
+        self.step1_original_canvas = recolor.ZoomImageCanvas(
+            preview_panes,
+            "Originalbild",
+            self.on_pick_color,
+            view_callback=self.on_step1_canvas_view_changed,
+        )
+        self.step1_edited_canvas = recolor.ZoomImageCanvas(
+            preview_panes,
+            "Bearbeitet / technische Zwischenstufe",
+            view_callback=self.on_step1_canvas_view_changed,
+        )
+        ttk.Checkbutton(
+            self.step1_original_canvas.header_frame,
+            text="Gemeinsames Verschieben",
+            variable=self.step1_sync_view_var,
+            command=self.sync_step1_canvas_views_now,
+        ).pack(side="left", padx=(18, 0))
         # Rechte Vorschau: Im normalen Modus bleibt Ziehen = Verschieben.
         # Im Radierer-Modus werden die Standard-Bindings ersetzt und an die App delegiert,
         # damit Pinseln nicht gleichzeitig die Ansicht verschiebt.
@@ -204,7 +221,7 @@ def _build_step1(self) -> None:
         self.step1_tab_key_var = tk.StringVar(value="prep")
         self.step1_tab_display_var = tk.StringVar(value=tr("step1.mode.prep"))
         self.step1_tab_hint_var = tk.StringVar(value=tr("step1.mode_hint.prep"))
-        self.step1_mode_keys = ["prep", "basic", "manual", "eraser", "logo", "photo_scan"]
+        self.step1_mode_keys = ["prep", "basic", "manual", "eraser", "logo", "photo_scan", "ai_upscale"]
         self.step1_mode_display_to_key = {tr(f"step1.mode.{key}"): key for key in self.step1_mode_keys}
 
         self.step1_mode_selector = ttk.LabelFrame(settings, text=tr("step1.mode_selector"), padding=(8, 6, 8, 6))
@@ -272,12 +289,14 @@ def _build_step1(self) -> None:
         self.eraser_tab = ttk.Frame(self.step1_notebook, padding=8)
         self.logo_tab = ttk.Frame(self.step1_notebook, padding=8)
         self.photo_scan_tab = ttk.Frame(self.step1_notebook, padding=8)
+        self.ai_upscale_tab = ttk.Frame(self.step1_notebook, padding=8)
         self.step1_notebook.add(self.prep_tab, text=tr("step1.tab_preprocess"))
         self.step1_notebook.add(self.basic_tab, text=tr("step1.tab_basic"))
         self.step1_notebook.add(self.manual_tab, text=tr("step1.tab_manual"))
         self.step1_notebook.add(self.eraser_tab, text=tr("step1.tab_eraser"))
         self.step1_notebook.add(self.logo_tab, text=tr("step1.tab_logo"))
         self.step1_notebook.add(self.photo_scan_tab, text=tr("step1.tab_photo_scan"))
+        self.step1_notebook.add(self.ai_upscale_tab, text=tr("step1.tab_ai_upscale"))
         self.step1_tabs_by_key = {
             "prep": self.prep_tab,
             "basic": self.basic_tab,
@@ -285,6 +304,7 @@ def _build_step1(self) -> None:
             "eraser": self.eraser_tab,
             "logo": self.logo_tab,
             "photo_scan": self.photo_scan_tab,
+            "ai_upscale": self.ai_upscale_tab,
         }
         self.step1_tab_keys_by_widget = {widget: key for key, widget in self.step1_tabs_by_key.items()}
 
@@ -294,6 +314,7 @@ def _build_step1(self) -> None:
         self._build_step1_eraser_tab()
         self._build_step1_logo_tab()
         self._build_step1_photo_scan_tab()
+        self._build_step1_ai_upscale_tab()
         self.select_step1_tab("prep")
 
         step1_tools = ttk.LabelFrame(preview, text=tr("step1.tools"), padding=(8, 6, 8, 6))
@@ -832,3 +853,85 @@ def _build_step1_photo_scan_tab(self) -> None:
 
         status_label = ttk.Label(tab, textvariable=self.photo_scan_status_var, foreground="#555", wraplength=560, justify="left")
         status_label.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+
+def _build_step1_ai_upscale_tab(self) -> None:
+        tab = self.ai_upscale_tab
+        tab.columnconfigure(1, weight=1)
+        
+        hint = ttk.Label(tab, text=tr("step1.ai_upscale_hint"), foreground="#555", wraplength=560, justify="left")
+        hint.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        self._register_i18n(hint, "text", "step1.ai_upscale_hint")
+        
+        model_label = ttk.Label(tab, text=tr("step1.ai_upscale_model"))
+        model_label.grid(row=1, column=0, sticky="w", pady=3)
+        self._register_i18n(model_label, "text", "step1.ai_upscale_model")
+        ttk.Entry(tab, textvariable=self.ai_upscale_model_var, width=40).grid(row=1, column=1, sticky="ew", pady=3, padx=(8, 4))
+        ttk.Button(tab, text=tr("button.choose"), command=self.choose_ai_upscale_model).grid(row=1, column=2, sticky="w", pady=3)
+        
+        size_frame = ttk.LabelFrame(tab, text=tr("step1.ai_upscale_size"), padding=(8, 6, 8, 6))
+        size_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        size_frame.columnconfigure(1, weight=1)
+        self._register_i18n(size_frame, "text", "step1.ai_upscale_size")
+
+        original_size_label = ttk.Label(
+            size_frame,
+            textvariable=self.ai_upscale_original_size_var,
+            foreground="#555",
+            justify="left",
+        )
+        original_size_label.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        
+        ttk.Radiobutton(size_frame, text=tr("step1.ai_upscale_px"), value="px", variable=self.ai_upscale_unit_var).grid(row=1, column=0, sticky="w", padx=(0, 12))
+        self._register_i18n(size_frame.winfo_children()[-1], "text", "step1.ai_upscale_px")
+        ttk.Radiobutton(size_frame, text=tr("step1.ai_upscale_percent"), value="percent", variable=self.ai_upscale_unit_var).grid(row=1, column=1, sticky="w")
+        self._register_i18n(size_frame.winfo_children()[-1], "text", "step1.ai_upscale_percent")
+        
+        width_label = ttk.Label(size_frame, text=tr("step1.ai_upscale_width"))
+        width_label.grid(row=2, column=0, sticky="w", pady=(8, 3))
+        self._register_i18n(width_label, "text", "step1.ai_upscale_width")
+        width_entry = ttk.Entry(size_frame, textvariable=self.ai_upscale_width_var, width=12)
+        width_entry.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(8, 3))
+        
+        height_label = ttk.Label(size_frame, text=tr("step1.ai_upscale_height"))
+        height_label.grid(row=3, column=0, sticky="w", pady=3)
+        self._register_i18n(height_label, "text", "step1.ai_upscale_height")
+        height_entry = ttk.Entry(size_frame, textvariable=self.ai_upscale_height_var, width=12)
+        height_entry.grid(row=3, column=1, sticky="w", padx=(8, 0), pady=3)
+        self.ai_upscale_width_entry = width_entry
+        self.ai_upscale_height_entry = height_entry
+
+        master_frame = ttk.Frame(size_frame)
+        master_frame.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.ai_upscale_master_frame = master_frame
+        ttk.Label(master_frame, text="Bei festen Proportionen bearbeiten:").pack(side="left")
+        ttk.Radiobutton(master_frame, text="Breite", value="width", variable=self.ai_upscale_aspect_master_var, command=self.update_ai_upscale_dimension_edit_state).pack(side="left", padx=(8, 4))
+        ttk.Radiobutton(master_frame, text="Höhe", value="height", variable=self.ai_upscale_aspect_master_var, command=self.update_ai_upscale_dimension_edit_state).pack(side="left")
+        
+        keep_aspect_btn = ttk.Checkbutton(size_frame, text=tr("step1.ai_upscale_keep_aspect"), variable=self.ai_upscale_keep_aspect_var, command=self.update_ai_upscale_dimension_edit_state)
+        keep_aspect_btn.grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.update_ai_upscale_dimension_edit_state()
+        self._register_i18n(keep_aspect_btn, "text", "step1.ai_upscale_keep_aspect")
+        
+        output_label = ttk.Label(tab, text=tr("step1.ai_upscale_output"))
+        output_label.grid(row=3, column=0, sticky="w", pady=(12, 3))
+        self._register_i18n(output_label, "text", "step1.ai_upscale_output")
+        ttk.Entry(tab, textvariable=self.ai_upscale_output_var, width=40).grid(row=3, column=1, sticky="ew", pady=(12, 3), padx=(8, 4))
+        ttk.Button(tab, text=tr("button.choose"), command=self.choose_ai_upscale_output).grid(row=3, column=2, sticky="w", pady=(12, 3))
+        
+        action_row = ttk.Frame(tab)
+        action_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(12, 0))
+        action_row.columnconfigure(1, weight=1)
+        
+        preview_btn = _create_action_button(
+            action_row,
+            tr("step1.ai_upscale_preview"),
+            self.create_ai_upscale_preview,
+            bg=ACTION_GREEN,
+            activebackground=ACTION_GREEN_ACTIVE,
+        )
+        preview_btn.grid(row=0, column=0, sticky="w")
+        self._register_i18n(preview_btn, "text", "step1.ai_upscale_preview")
+        
+        warning_label = ttk.Label(tab, text=tr("step1.ai_upscale_warning"), foreground="#ca8a04", wraplength=560, justify="left")
+        warning_label.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        self._register_i18n(warning_label, "text", "step1.ai_upscale_warning")

@@ -211,22 +211,7 @@ def _build_step2(self) -> None:
         bbox_label.grid(row=3, column=0, sticky="nw", pady=(6, 0))
         self._register_i18n(bbox_label, "text", "step2.bbox")
         ttk.Label(workflow_bar, textvariable=self.vector_bbox_info_var, foreground="#555", justify="left").grid(row=3, column=1, columnspan=3, sticky="w", pady=(6, 0))
-        target_w_label = ttk.Label(workflow_bar, text=tr("step2.target_width_mm"))
-        target_w_label.grid(row=4, column=0, sticky="w", pady=(6, 0))
-        self._register_i18n(target_w_label, "text", "step2.target_width_mm")
-        ttk.Entry(workflow_bar, textvariable=self.target_width_mm_var, width=8).grid(row=4, column=1, sticky="w", pady=(6, 0))
-        target_h_label = ttk.Label(workflow_bar, text=tr("step2.target_height_mm"))
-        target_h_label.grid(row=4, column=2, sticky="w", padx=(12, 4), pady=(6, 0))
-        self._register_i18n(target_h_label, "text", "step2.target_height_mm")
-        ttk.Entry(workflow_bar, textvariable=self.target_height_mm_var, width=8).grid(row=4, column=3, sticky="w", pady=(6, 0))
-        scale_btn = ttk.Button(workflow_bar, text=tr("step2.calculate_scale"), command=self.apply_target_size_to_scale)
-        scale_btn.grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        self._register_i18n(scale_btn, "text", "step2.calculate_scale")
-        cad_tol_label = ttk.Label(workflow_bar, text=tr("step2.cad_tolerance_mm"))
-        cad_tol_label.grid(row=5, column=2, sticky="w", padx=(12, 4), pady=(6, 0))
-        self._register_i18n(cad_tol_label, "text", "step2.cad_tolerance_mm")
-        ttk.Entry(workflow_bar, textvariable=self.cad_tolerance_mm_var, width=8).grid(row=5, column=3, sticky="w", pady=(6, 0))
-        ttk.Label(workflow_bar, text="Kompatibilität:").grid(row=6, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(workflow_bar, text="Kompatibilität:").grid(row=4, column=0, sticky="w", pady=(6, 0))
         self.compat_box_side = ttk.Combobox(
             workflow_bar,
             textvariable=self.dxf_compatibility_display_var,
@@ -234,9 +219,9 @@ def _build_step2(self) -> None:
             state="readonly",
             width=30,
         )
-        self.compat_box_side.grid(row=6, column=1, sticky="w", pady=(6, 0))
+        self.compat_box_side.grid(row=4, column=1, sticky="w", pady=(6, 0))
         self.compat_box_side.bind("<<ComboboxSelected>>", lambda _event: self.on_dxf_compatibility_display_changed())
-        ttk.Label(workflow_bar, text="DXF-Format:").grid(row=7, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(workflow_bar, text="DXF-Format:").grid(row=5, column=0, sticky="w", pady=(6, 0))
         self.version_box_side = ttk.Combobox(
             workflow_bar,
             textvariable=self.dxf_version_var,
@@ -244,7 +229,7 @@ def _build_step2(self) -> None:
             state="readonly",
             width=42,
         )
-        self.version_box_side.grid(row=7, column=1, columnspan=3, sticky="w", pady=(6, 0))
+        self.version_box_side.grid(row=5, column=1, columnspan=3, sticky="w", pady=(6, 0))
         self.version_box_side.bind("<<ComboboxSelected>>", lambda _event: self.on_dxf_version_changed())
 
         colors_bar = ttk.LabelFrame(settings, text="Farben / Layer", padding=(8, 6, 8, 6))
@@ -390,8 +375,13 @@ def _build_step2(self) -> None:
         cad_epsilon_label.grid(row=30, column=0, sticky="w", pady=(8, 0))
         self._register_i18n(cad_epsilon_label, "text", "step2.cad_deviation")
         self._add_tooltip(cad_epsilon_label, "tooltip.step2.cad_deviation")
-        ttk.Scale(opts, from_=0.0, to=5.0, variable=self.global_epsilon_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.global_epsilon_var, value, 2)).grid(row=30, column=1, sticky="ew", padx=(4, 4), pady=(8, 0))
-        ttk.Spinbox(opts, from_=0.0, to=5.0, increment=0.01, textvariable=self.global_epsilon_var, width=8, format="%.2f").grid(row=30, column=2, sticky="w", pady=(8, 0))
+        global_epsilon_scale = ttk.Scale(opts, from_=0.0, to=5.0, variable=self.global_epsilon_var, orient="horizontal")
+        global_epsilon_scale.grid(row=30, column=1, sticky="ew", padx=(4, 4), pady=(8, 0))
+        global_epsilon_scale.bind("<ButtonRelease-1>", lambda e: self._schedule_live_preview_if_enabled())
+        global_epsilon_spin = ttk.Spinbox(opts, from_=0.0, to=5.0, increment=0.01, textvariable=self.global_epsilon_var, width=8, format="%.2f")
+        global_epsilon_spin.grid(row=30, column=2, sticky="w", pady=(8, 0))
+        global_epsilon_spin.bind("<Return>", lambda e: self._schedule_live_preview_if_enabled())
+        global_epsilon_spin.bind("<FocusOut>", lambda e: self._schedule_live_preview_if_enabled())
         ttk.Label(opts, textvariable=self.cad_point_count_var, foreground="#555").grid(row=30, column=3, columnspan=2, sticky="w", padx=(8, 0), pady=(8, 0))
         ttk.Button(opts, text="Epsilon auf alle Farben anwenden", command=self.apply_global_epsilon_to_rows).grid(row=31, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.high_detail_btn = ttk.Button(opts, text=tr("step2.high_detail"), command=self.apply_high_detail_mode)
@@ -400,8 +390,13 @@ def _build_step2(self) -> None:
         ttk.Label(opts, text="Doppellinien-Toleranz px").grid(row=22, column=2, sticky="w", pady=(8, 0))
         ttk.Entry(opts, textvariable=self.duplicate_line_tolerance_var, width=8).grid(row=22, column=3, sticky="w", padx=(4, 0), pady=(8, 0))
         ttk.Checkbutton(opts, text="Rundungen glätten", variable=self.smooth_contours_var).grid(row=21, column=0, sticky="w", pady=(8, 0))
-        ttk.Scale(opts, from_=0, to=5, variable=self.smooth_strength_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.smooth_strength_var, value, 3)).grid(row=21, column=1, sticky="ew", padx=(4, 4), pady=(8, 0))
-        ttk.Spinbox(opts, from_=0, to=5, increment=0.001, textvariable=self.smooth_strength_var, width=8, format="%.3f").grid(row=21, column=2, sticky="w", padx=(4, 0), pady=(8, 0))
+        smooth_strength_scale = ttk.Scale(opts, from_=0, to=5, variable=self.smooth_strength_var, orient="horizontal")
+        smooth_strength_scale.grid(row=21, column=1, sticky="ew", padx=(4, 4), pady=(8, 0))
+        smooth_strength_scale.bind("<ButtonRelease-1>", lambda e: self._schedule_live_preview_if_enabled())
+        smooth_strength_spin = ttk.Spinbox(opts, from_=0, to=5, increment=0.001, textvariable=self.smooth_strength_var, width=8, format="%.3f")
+        smooth_strength_spin.grid(row=21, column=2, sticky="w", padx=(4, 0), pady=(8, 0))
+        smooth_strength_spin.bind("<Return>", lambda e: self._schedule_live_preview_if_enabled())
+        smooth_strength_spin.bind("<FocusOut>", lambda e: self._schedule_live_preview_if_enabled())
         ttk.Checkbutton(opts, text="Vorverarbeitung aktiv", variable=self.preprocess_vector_var).grid(row=8, column=0, sticky="w", pady=(8, 0))
         ttk.Button(
             opts,
@@ -410,14 +405,29 @@ def _build_step2(self) -> None:
             command=lambda: self.show_i18n_info("msg.preprocess_info_title", "msg.preprocess_info_body"),
         ).grid(row=8, column=1, sticky="w", padx=(4, 0), pady=(8, 0))
         ttk.Label(opts, text="Weichzeichnen / Blur").grid(row=9, column=0, sticky="w", pady=(2, 0))
-        ttk.Scale(opts, from_=0.0, to=3.0, variable=self.preprocess_blur_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.preprocess_blur_var, value, 3)).grid(row=9, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
-        ttk.Spinbox(opts, from_=0.0, to=3.0, increment=0.001, textvariable=self.preprocess_blur_var, width=8, format="%.3f").grid(row=9, column=2, sticky="w", pady=(2, 0))
+        preprocess_blur_scale = ttk.Scale(opts, from_=0.0, to=3.0, variable=self.preprocess_blur_var, orient="horizontal")
+        preprocess_blur_scale.grid(row=9, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
+        preprocess_blur_scale.bind("<ButtonRelease-1>", lambda e: self._schedule_live_preview_if_enabled())
+        preprocess_blur_spin = ttk.Spinbox(opts, from_=0.0, to=3.0, increment=0.001, textvariable=self.preprocess_blur_var, width=8, format="%.3f")
+        preprocess_blur_spin.grid(row=9, column=2, sticky="w", pady=(2, 0))
+        preprocess_blur_spin.bind("<Return>", lambda e: self._schedule_live_preview_if_enabled())
+        preprocess_blur_spin.bind("<FocusOut>", lambda e: self._schedule_live_preview_if_enabled())
         ttk.Label(opts, text="Kanten beruhigen").grid(row=10, column=0, sticky="w", pady=(2, 0))
-        ttk.Scale(opts, from_=0, to=5, variable=self.preprocess_edge_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.preprocess_edge_var, value, 3)).grid(row=10, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
-        ttk.Spinbox(opts, from_=0, to=5, increment=0.001, textvariable=self.preprocess_edge_var, width=8, format="%.3f").grid(row=10, column=2, sticky="w", pady=(2, 0))
+        preprocess_edge_scale = ttk.Scale(opts, from_=0, to=5, variable=self.preprocess_edge_var, orient="horizontal")
+        preprocess_edge_scale.grid(row=10, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
+        preprocess_edge_scale.bind("<ButtonRelease-1>", lambda e: self._schedule_live_preview_if_enabled())
+        preprocess_edge_spin = ttk.Spinbox(opts, from_=0, to=5, increment=0.001, textvariable=self.preprocess_edge_var, width=8, format="%.3f")
+        preprocess_edge_spin.grid(row=10, column=2, sticky="w", pady=(2, 0))
+        preprocess_edge_spin.bind("<Return>", lambda e: self._schedule_live_preview_if_enabled())
+        preprocess_edge_spin.bind("<FocusOut>", lambda e: self._schedule_live_preview_if_enabled())
         ttk.Label(opts, text="Mindeststörung px").grid(row=11, column=0, sticky="w", pady=(2, 0))
-        ttk.Scale(opts, from_=0, to=50, variable=self.preprocess_noise_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.preprocess_noise_var, value, 3)).grid(row=11, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
-        ttk.Spinbox(opts, from_=0, to=50, increment=0.001, textvariable=self.preprocess_noise_var, width=8, format="%.3f").grid(row=11, column=2, sticky="w", pady=(2, 0))
+        preprocess_noise_scale = ttk.Scale(opts, from_=0, to=50, variable=self.preprocess_noise_var, orient="horizontal")
+        preprocess_noise_scale.grid(row=11, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
+        preprocess_noise_scale.bind("<ButtonRelease-1>", lambda e: self._schedule_live_preview_if_enabled())
+        preprocess_noise_spin = ttk.Spinbox(opts, from_=0, to=50, increment=0.001, textvariable=self.preprocess_noise_var, width=8, format="%.3f")
+        preprocess_noise_spin.grid(row=11, column=2, sticky="w", pady=(2, 0))
+        preprocess_noise_spin.bind("<Return>", lambda e: self._schedule_live_preview_if_enabled())
+        preprocess_noise_spin.bind("<FocusOut>", lambda e: self._schedule_live_preview_if_enabled())
         ttk.Label(opts, text="Interne Skalierung").grid(row=12, column=0, sticky="w", pady=(2, 0))
         self.internal_scale_box = ttk.Combobox(opts, textvariable=self.internal_scale_display_var, values=[self._internal_scale_label(key) for key in INTERNAL_SCALE_KEYS], state="readonly", width=10)
         self.internal_scale_box.grid(row=12, column=1, sticky="w", padx=(4, 12), pady=(2, 0))
@@ -431,14 +441,29 @@ def _build_step2(self) -> None:
             command=lambda: self.show_i18n_info("msg.smart_smoothing_info_title", "msg.smart_smoothing_info_body"),
         ).grid(row=13, column=1, sticky="w", padx=(4, 0), pady=(8, 0))
         ttk.Label(opts, text="Ecken schützen °").grid(row=14, column=0, sticky="w", pady=(2, 0))
-        ttk.Scale(opts, from_=10, to=120, variable=self.smart_corner_angle_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.smart_corner_angle_var, value, 3)).grid(row=14, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
-        ttk.Spinbox(opts, from_=10, to=120, increment=0.001, textvariable=self.smart_corner_angle_var, width=8, format="%.3f").grid(row=14, column=2, sticky="w", pady=(2, 0))
+        smart_corner_angle_scale = ttk.Scale(opts, from_=10, to=120, variable=self.smart_corner_angle_var, orient="horizontal")
+        smart_corner_angle_scale.grid(row=14, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
+        smart_corner_angle_scale.bind("<ButtonRelease-1>", lambda e: self._schedule_live_preview_if_enabled())
+        smart_corner_angle_spin = ttk.Spinbox(opts, from_=10, to=120, increment=0.001, textvariable=self.smart_corner_angle_var, width=8, format="%.3f")
+        smart_corner_angle_spin.grid(row=14, column=2, sticky="w", pady=(2, 0))
+        smart_corner_angle_spin.bind("<Return>", lambda e: self._schedule_live_preview_if_enabled())
+        smart_corner_angle_spin.bind("<FocusOut>", lambda e: self._schedule_live_preview_if_enabled())
         ttk.Label(opts, text="Gerade Linien Toleranz px").grid(row=15, column=0, sticky="w", pady=(2, 0))
-        ttk.Scale(opts, from_=0.2, to=5.0, variable=self.smart_line_tolerance_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.smart_line_tolerance_var, value, 3)).grid(row=15, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
-        ttk.Spinbox(opts, from_=0.2, to=5.0, increment=0.001, textvariable=self.smart_line_tolerance_var, width=8, format="%.3f").grid(row=15, column=2, sticky="w", pady=(2, 0))
+        smart_line_tolerance_scale = ttk.Scale(opts, from_=0.2, to=5.0, variable=self.smart_line_tolerance_var, orient="horizontal")
+        smart_line_tolerance_scale.grid(row=15, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
+        smart_line_tolerance_scale.bind("<ButtonRelease-1>", lambda e: self._schedule_live_preview_if_enabled())
+        smart_line_tolerance_spin = ttk.Spinbox(opts, from_=0.2, to=5.0, increment=0.001, textvariable=self.smart_line_tolerance_var, width=8, format="%.3f")
+        smart_line_tolerance_spin.grid(row=15, column=2, sticky="w", pady=(2, 0))
+        smart_line_tolerance_spin.bind("<Return>", lambda e: self._schedule_live_preview_if_enabled())
+        smart_line_tolerance_spin.bind("<FocusOut>", lambda e: self._schedule_live_preview_if_enabled())
         ttk.Label(opts, text="Kurven-Glättung").grid(row=16, column=0, sticky="w", pady=(2, 0))
-        ttk.Scale(opts, from_=0, to=5, variable=self.smart_curve_strength_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.smart_curve_strength_var, value, 3)).grid(row=16, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
-        ttk.Spinbox(opts, from_=0, to=5, increment=0.001, textvariable=self.smart_curve_strength_var, width=8, format="%.3f").grid(row=16, column=2, sticky="w", pady=(2, 0))
+        smart_curve_strength_scale = ttk.Scale(opts, from_=0, to=5, variable=self.smart_curve_strength_var, orient="horizontal")
+        smart_curve_strength_scale.grid(row=16, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
+        smart_curve_strength_scale.bind("<ButtonRelease-1>", lambda e: self._schedule_live_preview_if_enabled())
+        smart_curve_strength_spin = ttk.Spinbox(opts, from_=0, to=5, increment=0.001, textvariable=self.smart_curve_strength_var, width=8, format="%.3f")
+        smart_curve_strength_spin.grid(row=16, column=2, sticky="w", pady=(2, 0))
+        smart_curve_strength_spin.bind("<Return>", lambda e: self._schedule_live_preview_if_enabled())
+        smart_curve_strength_spin.bind("<FocusOut>", lambda e: self._schedule_live_preview_if_enabled())
         anchor_cleanup_check = ttk.Checkbutton(opts, text=tr("step2.anchor_cleanup"), variable=self.remove_loose_points_var, command=self.on_anchor_cleanup_toggle)
         anchor_cleanup_check.grid(row=17, column=0, columnspan=4, sticky="w", pady=(8, 0))
         self._register_i18n(anchor_cleanup_check, "text", "step2.anchor_cleanup")
@@ -446,23 +471,24 @@ def _build_step2(self) -> None:
         self.anchor_distance_label.grid(row=18, column=0, sticky="w", pady=(2, 0))
         self._register_i18n(self.anchor_distance_label, "text", "step2.anchor_min_distance")
         self._add_tooltip(self.anchor_distance_label, "tooltip.step2.anchor_min_distance")
-        self.anchor_distance_scale = ttk.Scale(opts, from_=0.0, to=5.0, variable=self.anchor_neighbor_distance_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.anchor_neighbor_distance_var, value, 2))
+        self.anchor_distance_scale = ttk.Scale(opts, from_=0.0, to=5.0, variable=self.anchor_neighbor_distance_var, orient="horizontal")
         self.anchor_distance_scale.grid(row=18, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
+        self.anchor_distance_scale.bind("<ButtonRelease-1>", lambda e: self._schedule_live_preview_if_enabled())
         self.anchor_distance_spin = ttk.Spinbox(opts, from_=0.0, to=5.0, increment=0.01, textvariable=self.anchor_neighbor_distance_var, width=8, format="%.2f")
         self.anchor_distance_spin.grid(row=18, column=2, sticky="w", pady=(2, 0))
+        self.anchor_distance_spin.bind("<Return>", lambda e: self._schedule_live_preview_if_enabled())
+        self.anchor_distance_spin.bind("<FocusOut>", lambda e: self._schedule_live_preview_if_enabled())
         self._refresh_anchor_cleanup_controls()
         hole_scale_label = ttk.Label(opts, text=tr("step2.hole_scale"))
         hole_scale_label.grid(row=5, column=0, sticky="w", pady=(2, 0))
         self._register_i18n(hole_scale_label, "text", "step2.hole_scale")
-        ttk.Scale(
-            opts,
-            from_=0.5,
-            to=1.5,
-            variable=self.hole_scale_var,
-            orient="horizontal",
-            command=lambda value: self._set_numeric_var(self.hole_scale_var, value, 3),
-        ).grid(row=5, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
-        ttk.Spinbox(opts, from_=0.5, to=1.5, increment=0.001, textvariable=self.hole_scale_var, width=8, format="%.3f").grid(row=5, column=2, sticky="w", pady=(2, 0))
+        hole_scale_scale = ttk.Scale(opts, from_=0.5, to=1.5, variable=self.hole_scale_var, orient="horizontal")
+        hole_scale_scale.grid(row=5, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
+        hole_scale_scale.bind("<ButtonRelease-1>", lambda e: self._schedule_live_preview_if_enabled())
+        hole_scale_spin = ttk.Spinbox(opts, from_=0.5, to=1.5, increment=0.001, textvariable=self.hole_scale_var, width=8, format="%.3f")
+        hole_scale_spin.grid(row=5, column=2, sticky="w", pady=(2, 0))
+        hole_scale_spin.bind("<Return>", lambda e: self._schedule_live_preview_if_enabled())
+        hole_scale_spin.bind("<FocusOut>", lambda e: self._schedule_live_preview_if_enabled())
         bridge_check = ttk.Checkbutton(opts, text=tr("step2.bridge_tabs"), variable=self.bridge_tabs_var)
         bridge_check.grid(row=23, column=0, sticky="w", pady=(10, 0))
         self._register_i18n(bridge_check, "text", "step2.bridge_tabs")
@@ -475,18 +501,33 @@ def _build_step2(self) -> None:
         bridge_mm_label = ttk.Label(opts, text=tr("step2.bridge_width_mm"))
         bridge_mm_label.grid(row=24, column=0, sticky="w", pady=(2, 0))
         self._register_i18n(bridge_mm_label, "text", "step2.bridge_width_mm")
-        ttk.Scale(opts, from_=0.0, to=10.0, variable=self.bridge_width_mm_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.bridge_width_mm_var, value, 3)).grid(row=24, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
-        ttk.Spinbox(opts, from_=0.0, to=10.0, increment=0.001, textvariable=self.bridge_width_mm_var, width=8, format="%.3f").grid(row=24, column=2, sticky="w", pady=(2, 0))
+        bridge_width_mm_scale = ttk.Scale(opts, from_=0.0, to=10.0, variable=self.bridge_width_mm_var, orient="horizontal")
+        bridge_width_mm_scale.grid(row=24, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
+        bridge_width_mm_scale.bind("<ButtonRelease-1>", lambda e: self._schedule_live_preview_if_enabled())
+        bridge_width_mm_spin = ttk.Spinbox(opts, from_=0.0, to=10.0, increment=0.001, textvariable=self.bridge_width_mm_var, width=8, format="%.3f")
+        bridge_width_mm_spin.grid(row=24, column=2, sticky="w", pady=(2, 0))
+        bridge_width_mm_spin.bind("<Return>", lambda e: self._schedule_live_preview_if_enabled())
+        bridge_width_mm_spin.bind("<FocusOut>", lambda e: self._schedule_live_preview_if_enabled())
         bridge_percent_label = ttk.Label(opts, text=tr("step2.bridge_width_percent"))
         bridge_percent_label.grid(row=25, column=0, sticky="w", pady=(2, 0))
         self._register_i18n(bridge_percent_label, "text", "step2.bridge_width_percent")
-        ttk.Scale(opts, from_=0.0, to=5.0, variable=self.bridge_width_percent_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.bridge_width_percent_var, value, 3)).grid(row=25, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
-        ttk.Spinbox(opts, from_=0.0, to=5.0, increment=0.001, textvariable=self.bridge_width_percent_var, width=8, format="%.3f").grid(row=25, column=2, sticky="w", pady=(2, 0))
+        bridge_width_percent_scale = ttk.Scale(opts, from_=0.0, to=5.0, variable=self.bridge_width_percent_var, orient="horizontal")
+        bridge_width_percent_scale.grid(row=25, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
+        bridge_width_percent_scale.bind("<ButtonRelease-1>", lambda e: self._schedule_live_preview_if_enabled())
+        bridge_width_percent_spin = ttk.Spinbox(opts, from_=0.0, to=5.0, increment=0.001, textvariable=self.bridge_width_percent_var, width=8, format="%.3f")
+        bridge_width_percent_spin.grid(row=25, column=2, sticky="w", pady=(2, 0))
+        bridge_width_percent_spin.bind("<Return>", lambda e: self._schedule_live_preview_if_enabled())
+        bridge_width_percent_spin.bind("<FocusOut>", lambda e: self._schedule_live_preview_if_enabled())
         bridge_count_label = ttk.Label(opts, text=tr("step2.bridge_count"))
         bridge_count_label.grid(row=26, column=0, sticky="w", pady=(2, 0))
         self._register_i18n(bridge_count_label, "text", "step2.bridge_count")
-        ttk.Scale(opts, from_=1.0, to=8.0, variable=self.bridge_count_var, orient="horizontal", command=lambda value: self._set_numeric_var(self.bridge_count_var, value, 3)).grid(row=26, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
-        ttk.Spinbox(opts, from_=1.0, to=8.0, increment=1.000, textvariable=self.bridge_count_var, width=8, format="%.3f").grid(row=26, column=2, sticky="w", pady=(2, 0))
+        bridge_count_scale = ttk.Scale(opts, from_=1.0, to=8.0, variable=self.bridge_count_var, orient="horizontal")
+        bridge_count_scale.grid(row=26, column=1, sticky="ew", padx=(4, 4), pady=(2, 0))
+        bridge_count_scale.bind("<ButtonRelease-1>", lambda e: self._schedule_live_preview_if_enabled())
+        bridge_count_spin = ttk.Spinbox(opts, from_=1.0, to=8.0, increment=1.000, textvariable=self.bridge_count_var, width=8, format="%.3f")
+        bridge_count_spin.grid(row=26, column=2, sticky="w", pady=(2, 0))
+        bridge_count_spin.bind("<Return>", lambda e: self._schedule_live_preview_if_enabled())
+        bridge_count_spin.bind("<FocusOut>", lambda e: self._schedule_live_preview_if_enabled())
         ttk.Label(opts, text="Kleine Objekte löschen").grid(row=19, column=0, sticky="w", pady=(8, 0))
         self.cleanup_mode_box = ttk.Combobox(opts, textvariable=self.cleanup_mode_display_var, values=[self._cleanup_label(key) for key in CLEANUP_MODE_KEYS], state="readonly", width=12)
         self.cleanup_mode_box.grid(row=19, column=1, sticky="w", padx=(4, 12), pady=(8, 0))
@@ -590,13 +631,21 @@ def _build_step2(self) -> None:
             preview_panes,
             "Zwischen-PNG",
             zoom_callback=self.on_step2_canvas_zoom_changed,
+            view_callback=self.on_step2_canvas_view_changed,
             mousewheel_zoom_enabled=False,
             fast_pan=True,
         )
+        ttk.Checkbutton(
+            self.step2_original_canvas.header_frame,
+            text="Gemeinsames Verschieben",
+            variable=self.step2_sync_view_var,
+            command=self.sync_step2_canvas_views_now,
+        ).pack(side="left", padx=(18, 0))
         self.step2_vector_canvas = recolor.ZoomImageCanvas(
             preview_panes,
             "Vektor-Vorschau",
             zoom_callback=self.on_step2_canvas_zoom_changed,
+            view_callback=self.on_step2_canvas_view_changed,
             overlay_draw_callback=self.draw_vector_canvas_overlay,
             mousewheel_zoom_enabled=False,
             fast_pan=True,
@@ -610,7 +659,6 @@ def _build_step2(self) -> None:
         self.step2_vector_canvas.canvas.bind("<BackSpace>", lambda _event: self.remove_selected_contour(), add="+")
         preview_panes.add(self.step2_original_canvas, weight=1)
         preview_panes.add(self.step2_vector_canvas, weight=1)
-
         bottom_actions = ttk.LabelFrame(preview, text=tr("step2.actions"), padding=(8, 6, 8, 6))
         bottom_actions.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         bottom_actions.columnconfigure(4, weight=1)

@@ -5,7 +5,7 @@
 <h1 align="center">Vektorrazor</h1>
 
 <p align="center">
-  <strong>PNG logo → CAD-oriented vector contours</strong>
+  <strong>PNG logo → AI upscaling → CAD-oriented vector contours</strong>
 </p>
 
 <p align="center">
@@ -16,7 +16,8 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.9%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/GUI-Tkinter-brightgreen" alt="GUI">
-  <img src="https://img.shields.io/badge/Export-DXF%20%7C%20SVG-orange" alt="Export">
+  <img src="https://img.shields.io/badge/Export-DXF%20%7C%20SVG%20%7C%20STL%20%7C%20OBJ-orange" alt="Export">
+  <img src="https://img.shields.io/badge/AI%20Upscale-Real--ESRGAN%20Vulkan-purple" alt="Real-ESRGAN Vulkan">
   <img src="https://img.shields.io/badge/License-GPLv3-blue" alt="License">
   <img src="https://img.shields.io/badge/Status-Prototype%20%2F%20CAD%20Workflow-yellow" alt="Status">
 </p>
@@ -25,14 +26,15 @@
 
 ## Overview
 
-**Vektorrazor** is a desktop tool that turns prepared PNG logos into more CAD-oriented vector contours.
+**Vektorrazor** is a desktop tool for preparing and vectorizing logos, scans and simple image sources.
 
-The workflow is intentionally split into two steps:
+The goal is not to create beautiful graphic artwork first. The goal is to create controllable contours that are easier to use in CAD, cutting, plotting, milling or technical post-processing:
 
 ```text
-1. Prepare the image / clean technical colors
-2. Vectorize / inspect contours / export DXF or SVG
+prepare image → optional AI upscale → clean technical colors → detect contours → remove noise → reduce points → export layers
 ```
+
+AI upscaling is optional. It is integrated through **Real-ESRGAN ncnn Vulkan** and can help with small or pixelated source images before vectorization.
 
 ## Quick start with a ready-to-use file
 
@@ -50,37 +52,50 @@ Vektorrazor-Windows-amd64-YYYY-MM-DD.zip
 5. In the program:
 
 ```text
-load PNG → continue to vectorization → detect / preview → export DXF / SVG
+load image → optionally AI upscale → continue to vectorization → inspect preview → export DXF / SVG / STL / OBJ
 ```
 
-### Linux amd64
+### Ubuntu / Linux amd64
 
-1. Download the Linux release asset from **GitHub Releases**:
+1. Download the Ubuntu/Linux release asset from **GitHub Releases**:
 
 ```text
-Vektorrazor-Linux-amd64-YYYY-MM-DD.tar.gz
+Vektorrazor-Ubuntu-amd64-YYYY-MM-DD.tar.gz
 ```
 
 2. Extract the archive:
 
 ```bash
-tar -xzf Vektorrazor-Linux-amd64-YYYY-MM-DD.tar.gz
-cd Vektorrazor-Linux-amd64-YYYY-MM-DD
+tar -xzf Vektorrazor-Ubuntu-amd64-YYYY-MM-DD.tar.gz
+cd Vektorrazor-Ubuntu-amd64-YYYY-MM-DD
 ```
 
-3. Make the binary executable:
+3. Make the binary executable and run it:
 
 ```bash
 chmod +x Vektorrazor
-```
-
-4. Start the program:
-
-```bash
 ./Vektorrazor
 ```
 
 Note: Linux requires a graphical desktop environment. On Windows 11, WSL usually works through WSLg. Older WSL setups may require an X server.
+
+### macOS
+
+1. Download the macOS release asset from **GitHub Releases**:
+
+```text
+Vektorrazor-macOS-YYYY-MM-DD.zip
+```
+
+2. Extract the ZIP file.
+3. Start Vektorrazor.
+4. If macOS blocks the launch: right-click the app or file and choose **Open**.
+
+If Real-ESRGAN files were extracted manually, macOS may add a quarantine attribute. From the extracted release folder, this can help:
+
+```bash
+xattr -dr com.apple.quarantine .
+```
 
 ## Installation
 
@@ -89,26 +104,82 @@ Normal users do not need a Python installation. Ready-to-use release files are p
 | System | File | Action |
 |---|---|---|
 | Windows amd64 | `Vektorrazor-Windows-amd64-YYYY-MM-DD.zip` | extract and start `Vektorrazor.exe` |
-| Linux amd64 | `Vektorrazor-Linux-amd64-YYYY-MM-DD.tar.gz` | extract, make executable and run |
+| Ubuntu / Linux amd64 | `Vektorrazor-Ubuntu-amd64-YYYY-MM-DD.tar.gz` | extract, make executable and run |
+| macOS | `Vektorrazor-macOS-YYYY-MM-DD.zip` | extract and run |
 
-### Windows
+## Real-ESRGAN / Vulkan upscaling
+
+Vektorrazor can optionally use **Real-ESRGAN ncnn Vulkan**. It runs locally and offline through a bundled command-line executable.
+
+Upscaling is mainly intended for small, pixelated or slightly blurry source images. For CAD usage, the final cleaned contour is more important than the most visually pleasing image.
+
+### Required folder structure
+
+Recommended release layout:
 
 ```text
-download ZIP → extract → start Vektorrazor.exe
+Vektorrazor.exe / Vektorrazor / Vektorrazor.app
+vektorrazor_config/
+  real_esrgan/
+    models/
+      realesr-animevideov3-x2.bin
+      realesr-animevideov3-x2.param
+      realesr-animevideov3-x3.bin
+      realesr-animevideov3-x3.param
+      realesr-animevideov3-x4.bin
+      realesr-animevideov3-x4.param
+    windows/
+      realesrgan-ncnn-vulkan.exe
+    ubuntu/
+      realesrgan-ncnn-vulkan
+    macos/
+      realesrgan-ncnn-vulkan
+    THIRD_PARTY_NOTICES.md
+    LICENSE-Real-ESRGAN-BSD-3-Clause.txt
+    LICENSE-Real-ESRGAN-ncnn-vulkan-MIT.txt
 ```
 
-### Linux
+The models are shared in the `models/` folder. The platform folders only contain the matching executable file.
+
+### Vulkan requirement
+
+Real-ESRGAN ncnn Vulkan requires working Vulkan support on the system.
+
+Typical requirements:
+
+- current graphics driver
+- Vulkan-capable GPU or compatible Vulkan runtime
+- on macOS, the matching Real-ESRGAN macOS build
+
+If Vulkan is not available or the Real-ESRGAN executable is missing, Vektorrazor should still be usable without AI upscaling.
+
+### Test commands
+
+Windows:
+
+```bat
+vektorrazor_config\real_esrgan\windows\realesrgan-ncnn-vulkan.exe -i input.png -o output.png -n realesr-animevideov3 -s 4 -m vektorrazor_config\real_esrgan\models -f png
+```
+
+Ubuntu / Linux:
 
 ```bash
-tar -xzf Vektorrazor-Linux-amd64-YYYY-MM-DD.tar.gz
-cd Vektorrazor-Linux-amd64-YYYY-MM-DD
-chmod +x Vektorrazor
-./Vektorrazor
+chmod +x vektorrazor_config/real_esrgan/ubuntu/realesrgan-ncnn-vulkan
+./vektorrazor_config/real_esrgan/ubuntu/realesrgan-ncnn-vulkan -i input.png -o output.png -n realesr-animevideov3 -s 4 -m vektorrazor_config/real_esrgan/models -f png
 ```
+
+macOS:
+
+```bash
+chmod +x vektorrazor_config/real_esrgan/macos/realesrgan-ncnn-vulkan
+./vektorrazor_config/real_esrgan/macos/realesrgan-ncnn-vulkan -i input.png -o output.png -n realesr-animevideov3 -s 4 -m vektorrazor_config/real_esrgan/models -f png
+```
+
+Note: The model name is `realesr-animevideov3`. The scale is selected with `-s 2`, `-s 3` or `-s 4`. That is why the model files include `-x2`, `-x3` or `-x4` in their file names.
 
 ## Developer notes
 
-The source code is still included in the repository. Developers can run from source or create custom builds with Python and PyInstaller.
+The source code is included in the repository. Developers can run Vektorrazor from source or create custom builds.
 
 ### Run from source
 
@@ -123,57 +194,54 @@ python main.py
 pyinstaller --onefile --windowed --clean --name Vektorrazor --icon assets\vektorrazor.ico --version-file version_info.txt --add-data "assets\vektorrazor.ico;assets" --add-data "assets\vektorrazor_icon.png;assets" main.py
 ```
 
-### Build a Linux amd64 binary manually
+### Build an Ubuntu/Linux binary manually
 
 ```bash
-pyinstaller --onefile --windowed --clean   --name Vektorrazor   --add-data "assets/vektorrazor.ico:assets"   --add-data "assets/vektorrazor_icon.png:assets"   main.py
+pyinstaller --onefile --windowed --clean \
+  --name Vektorrazor \
+  --add-data "assets/vektorrazor.ico:assets" \
+  --add-data "assets/vektorrazor_icon.png:assets" \
+  main.py
 ```
+
+### Build a macOS app manually
+
+```bash
+pyinstaller --onefile --windowed --clean \
+  --name Vektorrazor \
+  --add-data "assets/vektorrazor_icon.png:assets" \
+  main.py
+```
+
+Important: Keep Real-ESRGAN executables and models next to the application in the release folder instead of forcing them into the PyInstaller onefile bundle. This makes updates, license notices and troubleshooting much easier.
 
 ## Create release packages
 
-If both builds exist:
+Recommended release assets:
 
 ```text
-dist/Vektorrazor.exe
-dist/Vektorrazor
+release/Vektorrazor-Windows-amd64-YYYY-MM-DD.zip
+release/Vektorrazor-Ubuntu-amd64-YYYY-MM-DD.tar.gz
+release/Vektorrazor-macOS-YYYY-MM-DD.zip
+release/SHA256SUMS-YYYY-MM-DD.txt
 ```
 
-run:
-
-```bash
-chmod +x pack_release.sh
-./pack_release.sh
-```
-
-This creates for example:
-
-```text
-release/Vektorrazor-Windows-amd64-2026-05-26.zip
-release/Vektorrazor-Linux-amd64-2026-05-26.tar.gz
-release/SHA256SUMS-2026-05-26.txt
-```
+Include `vektorrazor_config/real_esrgan/` in the release package if AI upscaling should work out of the box.
 
 ## Use and extend languages
 
 The application loads language files from the `lang/` folder.
 
 - File names: `lang/lang_de.json`, `lang/lang_en.json`
-- PyInstaller priority: external `lang/` next to the EXE is preferred
+- PyInstaller priority: external `lang/` next to the EXE/app is preferred
 - Source/development mode: project-local `lang/` is used
-- If `lang/` is missing or files are incomplete, the hardcoded Python fallback (German) is used
+- If `lang/` is missing or files are incomplete, the hardcoded Python fallback is used
 
 Change language in the app:
 
-1. Start the app.
-2. Select a language in the header dropdown.
-3. Visible texts refresh without restarting.
-
-Add a new language:
-
-1. Create a new file `lang/lang_xx.json`.
-2. Set the key `"language.name"`, for example `"English"`.
-3. Copy keys from `lang/lang_de.json` and translate values.
-4. Missing keys are allowed; they automatically fall back and are printed to the console.
+```text
+start app → choose language in the header → UI updates without restart
+```
 
 ## Why not just use a regular vector program?
 
@@ -203,20 +271,22 @@ detect color → separate area → build contour → remove noise → reduce poi
 | Name | Vektorrazor |
 | Type | Desktop application |
 | GUI | Tkinter |
-| Ready-to-use downloads | Windows amd64 EXE, Linux amd64 binary |
+| Ready-to-use downloads | Windows amd64, Ubuntu/Linux amd64, macOS |
+| Optional AI upscaler | Real-ESRGAN ncnn Vulkan |
 | Input | PNG, JPG, BMP, WEBP, TIFF |
 | Intermediate format | technically cleaned PNG |
-| Export | DXF, SVG |
+| Export | DXF, SVG, STL, OBJ |
 | DXF compatibility | R2000, R2004, R2007, R2010, R2013, R2018 |
-| Goal | more CAD-friendly contours from prepared logos |
+| Goal | more CAD-friendly contours from prepared logos and image sources |
 | License | GPL-3.0 |
 
 ## Main features
 
 - image preparation with brightness, contrast, black point, white point and gamma
+- optional AI upscaling through Real-ESRGAN ncnn Vulkan
 - automatic color detection
 - exact technical RGB contrast colors
-- logo mask mode for difficult sources
+- logo/scan cleanup for difficult source images
 - dynamic color table
 - layer names per color
 - minimum area filter for noise removal
@@ -224,9 +294,21 @@ detect color → separate area → build contour → remove noise → reduce poi
 - smoothing and cleanup
 - preview modes for contour lines, object check and color mask
 - select and remove paths in the preview
-- SVG and DXF export
+- SVG, DXF, STL and OBJ-oriented export workflow
 - DXF compatibility presets for different programs
-- ready-to-use Windows amd64 and Linux amd64 downloads via GitHub Releases
+- ready-to-use builds for Windows, Ubuntu/Linux and macOS via GitHub Releases
+
+## Third-party / Real-ESRGAN
+
+The optional AI upscaling feature uses third-party components:
+
+- **Real-ESRGAN** by Xintao Wang / Tencent ARC Lab
+- **Real-ESRGAN ncnn Vulkan** by Xintao Wang
+- parts/components from **realsr-ncnn-vulkan** by nihui
+
+If Real-ESRGAN executables or models are shipped inside a Vektorrazor release, keep the corresponding license texts and copyright notices inside the release package.
+
+Vektorrazor is not officially affiliated with, endorsed by, or supported by Real-ESRGAN, Xintao Wang or Tencent ARC Lab.
 
 ## Copyright / Ownership
 

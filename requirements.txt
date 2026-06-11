@@ -1,5 +1,9 @@
-pillow
-numpy
-opencv-python
-ezdxf
-svgwrite
+# Vektorrazor runtime dependencies
+# Python 3.10+ recommended
+
+numpy>=1.24
+Pillow>=10.0
+opencv-python>=4.8
+ezdxf>=1.1
+svgwrite>=1.4
+shapely>=2.0
