@@ -9,8 +9,7 @@ Included model files may include:
 - realesr-animevideov3-x2.param
 - realesr-animevideov3-x3.bin
 - realesr-animevideov3-x3.param
-- realesr-animevideov3-x4.bin
-- realesr-animevideov3-x4.param
+
 
 These files are third-party model files from the Real-ESRGAN project / Real-ESRGAN-ncnn-vulkan release packages.
 
