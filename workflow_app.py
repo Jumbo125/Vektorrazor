@@ -677,14 +677,22 @@ class WorkflowApp(tk.Tk):
         return config
 
     def _default_ai_upscale_models_dir(self) -> Optional[Path]:
-        models_dir = ai_upscale.AiUpscalePaths(self.user_config_dir).models_dir
-        return models_dir if models_dir.is_dir() else None
+        return ai_upscale.AiUpscalePaths(self.user_config_dir).default_model_dir()
 
     def _default_ai_upscale_model_file(self) -> Optional[Path]:
-        return ai_upscale.AiUpscalePaths(self.user_config_dir).default_model_file()
+        return ai_upscale.AiUpscalePaths(self.user_config_dir).default_model_dir()
 
     def _default_ai_upscale_output_path(self) -> Path:
         return ai_upscale.AiUpscalePaths(self.user_config_dir).default_output_path()
+
+    def _normalize_ai_upscale_model_dir(self, raw_path: str) -> str:
+        text = str(raw_path or "").strip()
+        if not text:
+            return ""
+        path = Path(text).expanduser()
+        if path.is_file():
+            return str(path.parent)
+        return str(path)
 
     def _ensure_ai_upscale_defaults(self) -> None:
         self._update_ai_upscale_original_size_label()
@@ -692,6 +700,10 @@ class WorkflowApp(tk.Tk):
             default_model = self._default_ai_upscale_model_file()
             if default_model is not None:
                 self.ai_upscale_model_var.set(str(default_model))
+        else:
+            normalized = self._normalize_ai_upscale_model_dir(self.ai_upscale_model_var.get())
+            if normalized != self.ai_upscale_model_var.get():
+                self.ai_upscale_model_var.set(normalized)
         if not self.ai_upscale_output_var.get().strip():
             self.ai_upscale_output_var.set(str(self._default_ai_upscale_output_path()))
         if self.original_image is not None:
@@ -740,7 +752,7 @@ class WorkflowApp(tk.Tk):
             base=base,
             width=width,
             height=height,
-            model_path=Path(self.ai_upscale_model_var.get().strip()),
+            model_dir=Path(self._normalize_ai_upscale_model_dir(self.ai_upscale_model_var.get().strip())),
             output_path=Path(self.ai_upscale_output_var.get().strip() or self._default_ai_upscale_output_path()),
             paths=ai_upscale.AiUpscalePaths(self.user_config_dir),
             progress_callback=progress_callback,
@@ -824,7 +836,7 @@ class WorkflowApp(tk.Tk):
         paths_config = self.user_config.get("paths", {})
         ai_model = str(paths_config.get("ai_upscale_model", ""))
         if ai_model:
-            self.ai_upscale_model_var.set(ai_model)
+            self.ai_upscale_model_var.set(self._normalize_ai_upscale_model_dir(ai_model))
         ai_output = str(paths_config.get("ai_upscale_output", ""))
         if ai_output:
             self.ai_upscale_output_var.set(ai_output)
@@ -876,7 +888,7 @@ class WorkflowApp(tk.Tk):
             config["paths"]["output_dir"] = str(Path(output_path).expanduser().parent)
         ai_model_path = self.ai_upscale_model_var.get().strip()
         if ai_model_path:
-            config["paths"]["ai_upscale_model"] = ai_model_path
+            config["paths"]["ai_upscale_model"] = self._normalize_ai_upscale_model_dir(ai_model_path)
         ai_output_path = self.ai_upscale_output_var.get().strip()
         if ai_output_path:
             config["paths"]["ai_upscale_output"] = ai_output_path
@@ -3810,13 +3822,12 @@ class WorkflowApp(tk.Tk):
         initial_dir = self._default_ai_upscale_models_dir()
         if initial_dir is None:
             initial_dir = Path(self._initial_dir_from_config("input"))
-        path = filedialog.askopenfilename(
+        path = filedialog.askdirectory(
             title=tr("step1.ai_upscale_choose_model"),
             initialdir=str(initial_dir),
-            filetypes=[("Model Files", "*.pth *.onnx *.bin *.param"), ("Alle Dateien", "*.*")],
         )
         if path:
-            self.ai_upscale_model_var.set(path)
+            self.ai_upscale_model_var.set(self._normalize_ai_upscale_model_dir(path))
 
     def choose_ai_upscale_output(self) -> None:
         initial = "upscaled.png"
@@ -3930,8 +3941,9 @@ class WorkflowApp(tk.Tk):
         unit = self.ai_upscale_unit_var.get()
         width_text = str(self.ai_upscale_width_var.get()).strip().replace(",", ".")
         height_text = str(self.ai_upscale_height_var.get()).strip().replace(",", ".")
-        if self.ai_upscale_keep_aspect_var.get():
-            master = str(self.ai_upscale_aspect_master_var.get() or "width")
+        keep_aspect = bool(self.ai_upscale_keep_aspect_var.get())
+        master = str(self.ai_upscale_aspect_master_var.get() or "width")
+        if keep_aspect:
             if master == "width":
                 height_text = ""
             else:
@@ -3944,12 +3956,21 @@ class WorkflowApp(tk.Tk):
                 width = max(1, int(round(image.width * factor)))
                 height = max(1, int(round(image.height * factor)))
             else:
-                width = int(round(float(width_text))) if width_text else image.width
-                height = int(round(float(height_text))) if height_text else image.height
+                if keep_aspect:
+                    aspect = image.width / image.height if image.height else 1.0
+                    if master == "height":
+                        height = int(round(float(height_text))) if height_text else image.height
+                        width = max(1, int(round(height * aspect)))
+                    else:
+                        width = int(round(float(width_text))) if width_text else image.width
+                        height = max(1, int(round(width / aspect)))
+                else:
+                    width = int(round(float(width_text))) if width_text else image.width
+                    height = int(round(float(height_text))) if height_text else image.height
         except Exception:
             width = image.width
             height = image.height
-        if self.ai_upscale_keep_aspect_var.get() and width > 0 and height > 0:
+        if keep_aspect and unit == "percent" and width > 0 and height > 0:
             aspect = image.width / image.height if image.height else 1.0
             if width / max(1, height) > aspect:
                 width = max(1, int(round(height * aspect)))

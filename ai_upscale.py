@@ -56,6 +56,9 @@ class AiUpscalePaths:
         out.parent.mkdir(parents=True, exist_ok=True)
         return out
 
+    def default_model_dir(self) -> Optional[Path]:
+        return self.models_dir if self.models_dir.is_dir() else None
+
     def default_model_file(self) -> Optional[Path]:
         if not self.models_dir.is_dir():
             return None
@@ -82,24 +85,47 @@ def _model_name(model_path: Path) -> str:
     return model_path.name
 
 
-def resolve_model_spec(model_path: Path, models_dir: Path) -> tuple[str, list[int]]:
-    if not models_dir.is_dir():
-        raise FileNotFoundError("Real-ESRGAN models-Ordner wurde nicht gefunden.")
-    if model_path.resolve().parent != models_dir.resolve():
-        raise ValueError(f"Das gewählte Modell muss im gemeinsamen models-Ordner liegen: {models_dir}")
+def resolve_model_dir(model_dir: Path) -> Path:
+    if model_dir.is_file():
+        model_dir = model_dir.parent
+    if not model_dir.is_dir():
+        raise FileNotFoundError(f"Modellordner nicht gefunden: {model_dir}")
+    return model_dir
 
-    stem = model_path.stem
+
+def resolve_model_spec(model_dir: Path) -> tuple[Path, str, list[int]]:
+    model_dir = resolve_model_dir(model_dir)
+
+    anime_scales: list[int] = []
+    for scale in (2, 3, 4):
+        if (model_dir / f"realesr-animevideov3-x{scale}.bin").exists():
+            anime_scales.append(scale)
+    if anime_scales:
+        return model_dir, "realesr-animevideov3", anime_scales
+
+    if (model_dir / "realesrgan-x4plus.bin").exists():
+        return model_dir, "realesrgan-x4plus", [4]
+
+    # Fallback fuer andere Modellordner: exakt eine bekannte Modellbasis nutzen.
+    candidates = sorted(p for p in model_dir.iterdir() if p.suffix.lower() in {".bin", ".pth", ".onnx", ".param"})
+    if not candidates:
+        raise FileNotFoundError(
+            "Im gewählten Modellordner wurde kein passendes Real-ESRGAN-Modell gefunden. "
+            "Erwartet werden z. B. realesr-animevideov3-x2/x3/x4 oder realesrgan-x4plus."
+        )
+
+    stem = candidates[0].stem
     if stem.startswith("realesr-animevideov3-x"):
         available_scales: list[int] = []
         for scale in (2, 3, 4):
-            if (models_dir / f"realesr-animevideov3-x{scale}.bin").exists():
+            if (model_dir / f"realesr-animevideov3-x{scale}.bin").exists():
                 available_scales.append(scale)
         if not available_scales:
             raise FileNotFoundError("Für realesr-animevideov3 wurden keine x2/x3/x4-Modelle gefunden.")
-        return "realesr-animevideov3", available_scales
+        return model_dir, "realesr-animevideov3", available_scales
     if stem == "realesrgan-x4plus":
-        return "realesrgan-x4plus", [4]
-    return _model_name(model_path), [4]
+        return model_dir, "realesrgan-x4plus", [4]
+    return model_dir, _model_name(candidates[0]), [4]
 
 
 def build_pass_scales(scale_factor: float, available_scales: list[int]) -> list[int]:
@@ -130,7 +156,7 @@ def run_ai_upscale(
     base: Image.Image,
     width: int,
     height: int,
-    model_path: Path,
+    model_dir: Path,
     output_path: Path,
     paths: AiUpscalePaths,
     progress_callback: Optional[Callable[[float, str], None]] = None,
@@ -138,11 +164,8 @@ def run_ai_upscale(
     exe_path = paths.executable_path()
     if exe_path is None:
         raise FileNotFoundError("Real-ESRGAN executable wurde nicht gefunden.")
-    if not model_path.exists():
-        raise FileNotFoundError(f"Modell nicht gefunden: {model_path}")
-
     platform_dir = exe_path.parent
-    model_name, available_scales = resolve_model_spec(model_path, paths.models_dir)
+    resolved_model_dir, model_name, available_scales = resolve_model_spec(model_dir)
     paths.tmp_dir.mkdir(parents=True, exist_ok=True)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -171,7 +194,7 @@ def run_ai_upscale(
             "-o", str(pass_output_path),
             "-n", model_name,
             "-s", str(cli_scale),
-            "-m", str(paths.models_dir),
+            "-m", str(resolved_model_dir),
             "-t", "0",
             "-j", "1:2:2",
             "-f", "png",
