@@ -92,5 +92,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Vektorrazor-2.1-macOS
-          path: artifact/Vektorrazor-2.1-macOS
+          name: Vektorrazor-2.2-macOS
+          path: artifact/Vektorrazor-2.2-macOS
