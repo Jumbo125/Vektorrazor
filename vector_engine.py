@@ -1820,7 +1820,8 @@ def export_svg(
     fill_closed_shapes: bool = False,
     use_bezier: bool = False,
     group_connected_paths: bool = False,
-    force_color_layers: bool = False
+    force_color_layers: bool = False,
+    mask_fill_colors: Optional[Dict[int, Tuple[int, int, int]]] = None
 ) -> None:
     width_px, height_px = image_size
     width_mm = width_px * pixel_to_mm
@@ -1834,18 +1835,35 @@ def export_svg(
 
     groups: Dict[str, Any] = {}
 
+    def fill_rgb_for(item: DetectedContour) -> Tuple[int, int, int]:
+        # Schlüssel ist id(item.rule), nicht id(item): Löcher teilen sich die
+        # Regel ihrer Außenkontur und müssen dieselbe Füllfarbe bekommen, sonst
+        # bricht die evenodd-Gruppierung (siehe _build_mask_fill_colors).
+        if mask_fill_colors is not None:
+            override = mask_fill_colors.get(id(item.rule))
+            if override is not None:
+                return override
+        return item.rule.rgb
+
     if fill_closed_shapes:
         # Gefüllte SVGs brauchen bei Innenlöchern eine zusammengesetzte Pfadstruktur.
         # Mehrere getrennt gefüllte Einzelpfade würden Löcher wieder zufüllen.
         # evenodd ist nicht perfekt für alle überlappenden Sonderfälle, aber deutlich
         # robuster als jedes Polygon einzeln zu füllen.
-        layer_paths: Dict[str, list[str]] = {}
-        layer_colors: Dict[str, str] = {}
+        # Gruppierung nach (Layer, Farbe) statt nur Layer: mehrere Regeln, die
+        # denselben Layer-Namen teilen, dürfen sich sonst gegenseitig die Füllfarbe
+        # überschreiben (nur die zuletzt verarbeitete Regel hätte gewonnen).
+        layer_paths: Dict[Tuple[str, str], list[str]] = {}
+        layer_colors: Dict[Tuple[str, str], str] = {}
+        layer_group_ids: Dict[Tuple[str, str], str] = {}
 
         for item in contours:
             if not item.rule.export:
                 continue
             layer = color_layer_for_rule(item.rule, force_color_layers=force_color_layers)
+            fill_color = fill_rgb_for(item)
+            color_hex = rgb_to_hex(fill_color)
+            group_key = (layer, color_hex)
             if layer not in groups:
                 groups[layer] = dwg.g(id=layer)
                 dwg.add(groups[layer])
@@ -1854,31 +1872,33 @@ def export_svg(
                 continue
             path_data = build_bezier_path(scaled, item.closed) if use_bezier else build_polyline_path(scaled, item.closed)
             if item.closed and len(scaled) >= 3:
-                layer_paths.setdefault(layer, []).append(path_data)
-                layer_colors[layer] = rgb_to_hex(item.rule.rgb)
+                layer_paths.setdefault(group_key, []).append(path_data)
+                layer_colors[group_key] = color_hex
+                layer_group_ids[group_key] = layer
             elif not group_connected_paths:
                 groups[layer].add(
                     dwg.path(
                         d=path_data,
                         fill="none",
-                        stroke=rgb_to_hex(item.rule.rgb),
+                        stroke=color_hex,
                         stroke_width=max(0.05, pixel_to_mm)
                     )
                 )
 
         if group_connected_paths:
             for group_index, group_contours in enumerate(group_connected_contours(contours)):
-                parts_by_layer: Dict[str, list[str]] = {}
-                colors_by_layer: Dict[str, str] = {}
+                parts_by_key: Dict[Tuple[str, str], list[str]] = {}
                 for item in group_contours:
                     layer = color_layer_for_rule(item.rule, force_color_layers=force_color_layers)
                     scaled = [(x * pixel_to_mm, y * pixel_to_mm) for x, y in item.points]
                     if not scaled:
                         continue
                     path_data = build_bezier_path(scaled, item.closed) if use_bezier else build_polyline_path(scaled, item.closed)
-                    parts_by_layer.setdefault(layer, []).append(path_data)
-                    colors_by_layer[layer] = rgb_to_hex(item.rule.rgb)
-                for layer, parts in parts_by_layer.items():
+                    color_hex = rgb_to_hex(fill_rgb_for(item))
+                    key = (layer, color_hex)
+                    parts_by_key.setdefault(key, []).append(path_data)
+                for key, parts in parts_by_key.items():
+                    layer, color_hex = key
                     if layer not in groups:
                         groups[layer] = dwg.g(id=layer)
                         dwg.add(groups[layer])
@@ -1886,20 +1906,21 @@ def export_svg(
                     object_group.add(
                         dwg.path(
                             d=" ".join(parts),
-                            fill=colors_by_layer.get(layer, "#000000"),
-                            stroke=colors_by_layer.get(layer, "#000000"),
+                            fill=color_hex,
+                            stroke=color_hex,
                             stroke_width=max(0.05, pixel_to_mm),
                             **{"fill-rule": "evenodd"}
                         )
                     )
                     groups[layer].add(object_group)
         else:
-            for layer, parts in layer_paths.items():
+            for group_key, parts in layer_paths.items():
+                layer = layer_group_ids[group_key]
                 groups[layer].add(
                     dwg.path(
                         d=" ".join(parts),
-                        fill=layer_colors.get(layer, "#000000"),
-                        stroke=layer_colors.get(layer, "#000000"),
+                        fill=layer_colors.get(group_key, "#000000"),
+                        stroke=layer_colors.get(group_key, "#000000"),
                         stroke_width=max(0.05, pixel_to_mm),
                         **{"fill-rule": "evenodd"}
                     )
