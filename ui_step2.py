@@ -740,6 +740,12 @@ def _build_step2(self) -> None:
         self.scale_export_action_btn.grid(row=0, column=3, sticky="w", padx=(0, 12))
         self._register_i18n(self.scale_export_action_btn, "text", "step2.export_scaled")
 
+        ttk.Checkbutton(
+            bottom_actions,
+            text="Export wie Farbmaske einfärben",
+            variable=self.export_color_like_mask_var
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
         panes.add(settings, weight=2)
         panes.add(preview, weight=5)
 
