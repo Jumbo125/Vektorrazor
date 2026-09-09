@@ -39,7 +39,7 @@ from __future__ import annotations
 
 
 from pathlib import Path
-from typing import Optional, Tuple, List, Any
+from typing import Optional, Tuple, List, Any, Dict
 import sys
 import math
 import json
@@ -526,6 +526,7 @@ class WorkflowApp(tk.Tk):
         self.centerline_merge_px_var = tk.StringVar(value="0")
         self.closed_paths_only_var = tk.BooleanVar(value=False)
         self.fill_closed_shapes_var = tk.BooleanVar(value=False)
+        self.export_color_like_mask_var = tk.BooleanVar(value=False)
         self.group_connected_paths_var = tk.BooleanVar(value=True)
         self.force_color_layers_var = tk.BooleanVar(value=True)
         self.object_layers_dxf_var = tk.BooleanVar(value=False)
@@ -3184,6 +3185,7 @@ class WorkflowApp(tk.Tk):
             self.centerline_merge_px_var.set("0")
             self.closed_paths_only_var.set(False)
             self.fill_closed_shapes_var.set(False)
+            self.export_color_like_mask_var.set(False)
             self.group_connected_paths_var.set(True)
             self.force_color_layers_var.set(True)
             self.object_layers_dxf_var.set(False)
@@ -6491,6 +6493,70 @@ class WorkflowApp(tk.Tk):
 
         return preview
 
+    def _build_mask_fill_colors(self, contours: List[Any]) -> Dict[int, Tuple[int, int, int]]:
+        """
+        Ermittelt je Farbregel die Farbe, die an ihrer Fläche tatsächlich in der
+        Farbmaske-Vorschau sichtbar wäre (inkl. Regel-Priorität bei
+        überlappenden Farbregeln), statt blind item.rule.rgb zu übernehmen.
+        Dient dem Export-Toggle "wie Farbmaske einfärben", der 1:1 zu
+        build_filled_mask_preview_image() passen soll.
+
+        Gesampelt wird auf der tatsächlichen Rastermaske der Regel (derselben,
+        die auch die Farbmaske-Vorschau zeichnet) statt auf dem vereinfachten
+        Vektorpolygon: Bei Ring-/Donut-Formen (z. B. Buchstaben O/D/A) liegt der
+        "tiefste" Punkt der reinen Außenkontur oft genau im Loch – dort würde
+        man versehentlich die Hintergrundfarbe statt der echten Regelfarbe
+        sampeln. Die Regel-Maske selbst hat solche Löcher bereits ausgespart.
+
+        Wichtig: Der Schlüssel ist id(rule), nicht id(item). Löcher gehören zur
+        selben Regel wie ihre Außenkontur; würde man ihnen eine andere
+        Füllfarbe zuweisen, würden Außenkontur und Loch beim SVG-Export in
+        unterschiedliche (Layer, Farbe)-Gruppen fallen und der evenodd-
+        Lochausschnitt bricht (Loch verschwindet oder wird falsch gefüllt).
+        """
+        result: Dict[int, Tuple[int, int, int]] = {}
+        if self.vector_image_rgb is None:
+            return result
+        rules_in_use = {id(item.rule): item.rule for item in contours if not getattr(item, "is_hole", False)}
+        if not rules_in_use:
+            return result
+
+        mask_arr = np.array(self.build_filled_mask_preview_image())
+        h, w = mask_arr.shape[:2]
+
+        try:
+            work_image = vector.preprocess_vector_image(
+                self.vector_image_rgb,
+                enabled=self.preprocess_vector_var.get(),
+                blur_radius=self.get_preprocess_blur(),
+                edge_smoothing=self.get_preprocess_edge_smoothing(),
+            )
+            mask_edge_smoothing = self.get_preprocess_edge_smoothing() if self.preprocess_vector_var.get() else 0.0
+            mask_noise_area = self.get_preprocess_noise_area() if self.preprocess_vector_var.get() else 0.0
+        except Exception:
+            work_image = self.vector_image_rgb
+            mask_edge_smoothing = 0.0
+            mask_noise_area = 0.0
+
+        for rule_id, rule in rules_in_use.items():
+            if not rule.export:
+                continue
+            try:
+                mask = vector.make_color_mask(work_image, rule.rgb, rule.tolerance)
+                mask = vector.remove_small_components(mask, rule.min_area)
+                if mask_edge_smoothing > 0.0 or mask_noise_area > 0.0:
+                    mask = vector.calm_mask_edges(mask, mask_edge_smoothing, mask_noise_area)
+            except Exception:
+                continue
+            if not np.any(mask):
+                continue
+            # Tiefster Punkt innerhalb der echten Regel-Maske (Löcher bereits ausgespart).
+            dist = vector.cv2.distanceTransform(mask.astype(np.uint8), vector.cv2.DIST_L2, 5)
+            _, _, _, max_loc = vector.cv2.minMaxLoc(dist)
+            px, py = max_loc
+            result[rule_id] = tuple(int(v) for v in mask_arr[py, px])
+        return result
+
     def build_object_check_preview_image(self) -> Image.Image:
         """
         Farbig codierte Objektvorschau aus den aktuell vorhandenen Pfaden.
@@ -7064,15 +7130,21 @@ class WorkflowApp(tk.Tk):
         h, w = self.vector_image_rgb.shape[:2]
         self.set_progress(60, tr("progress.writing_file"))
         if suffix == ".svg":
+            color_like_mask = self.export_color_like_mask_var.get()
+            # Der Toggle "wie Farbmaske einfärben" ergibt ohne Flächenfüllung
+            # keinen sichtbaren Effekt, daher erzwingt er die Füllung mit.
+            fill_closed_shapes = self.fill_closed_shapes_var.get() or color_like_mask
+            mask_fill_colors = self._build_mask_fill_colors(contours) if color_like_mask else None
             vector.export_svg(
                 out,
                 (w, h),
                 contours,
                 pixel_to_mm,
-                fill_closed_shapes=self.fill_closed_shapes_var.get(),
+                fill_closed_shapes=fill_closed_shapes,
                 use_bezier=self.use_bezier_var.get(),
                 group_connected_paths=self.group_connected_paths_var.get(),
                 force_color_layers=self.force_color_layers_var.get(),
+                mask_fill_colors=mask_fill_colors,
             )
         elif suffix == ".dxf":
             vector.export_dxf(
@@ -7134,15 +7206,19 @@ class WorkflowApp(tk.Tk):
             h, w = self.vector_image_rgb.shape[:2]
             self.set_progress(60, tr("progress.writing_file"))
             if suffix == ".svg":
+                color_like_mask = self.export_color_like_mask_var.get()
+                fill_closed_shapes = self.fill_closed_shapes_var.get() or color_like_mask
+                mask_fill_colors = self._build_mask_fill_colors(self.detected_contours) if color_like_mask else None
                 vector.export_svg(
                     out,
                     (w, h),
                     self.detected_contours,
                     pixel_to_mm,
-                    fill_closed_shapes=self.fill_closed_shapes_var.get(),
+                    fill_closed_shapes=fill_closed_shapes,
                     use_bezier=self.use_bezier_var.get(),
                     group_connected_paths=self.group_connected_paths_var.get(),
                     force_color_layers=self.force_color_layers_var.get(),
+                    mask_fill_colors=mask_fill_colors,
                 )
             elif suffix == ".dxf":
                 vector.export_dxf(
