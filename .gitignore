@@ -8,3 +8,6 @@
 /venv/
 /venv_linux/
 /release/
+
+__pycache__/
+*.py[cod]
