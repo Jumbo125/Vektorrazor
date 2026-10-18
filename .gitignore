@@ -1,0 +1,10 @@
+# Generierte Build-Artefakte und lokale Assets
+/build/
+/assets/
+/dist/
+
+# Lokale Python-Umgebungen und erzeugte GitHub-Release-Artefakte
+/.venv/
+/venv/
+/venv_linux/
+/release/

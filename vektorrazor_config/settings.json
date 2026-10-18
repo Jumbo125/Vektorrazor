@@ -1,0 +1,24 @@
+{
+  "app": {
+    "settings_version": 2,
+    "language_files_dir": "lang"
+  },
+  "ui": {
+    "language": "de",
+    "dark_mode": false,
+    "theme": "classic",
+    "complexity": "expert",
+    "motif_profile": "logo"
+  },
+  "paths": {
+    "last_input_dir": "C:\\Users\\AndreasRottmann\\Desktop\\tmp",
+    "last_input_path": "C:\\Users\\AndreasRottmann\\Desktop\\tmp\\Schnittmaske 01zu Kopie.pdf",
+    "output_dir": "C:\\Users\\AndreasRottmann\\Desktop\\tmp",
+    "output_path": "C:\\Users\\AndreasRottmann\\Desktop\\tmp\\Schnittmaske 01zu Kopie – Seite 1.dxf"
+  },
+  "export": {
+    "dxf_compatibility": "default",
+    "dxf_version": "R2000",
+    "live_preview": false
+  }
+}

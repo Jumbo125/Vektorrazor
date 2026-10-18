@@ -113,8 +113,9 @@ def _build_step1(self) -> None:
         ttk.Label(toolbar, text="Input-Bild:").grid(row=0, column=0, sticky="w", padx=(0, 6))
         ttk.Entry(toolbar, textvariable=self.input_path_var).grid(row=0, column=1, sticky="ew")
         ttk.Button(toolbar, text="Bild laden", command=self.choose_input_image).grid(row=0, column=2, padx=(6, 4))
+        ttk.Button(toolbar, text="PDF laden", command=self.choose_input_pdf).grid(row=0, column=3, padx=(0, 4))
         reset_workflow_btn = ttk.Button(toolbar, text=tr("step1.reset_workflow"), command=self.reset_workflow_for_new_image)
-        reset_workflow_btn.grid(row=0, column=3, padx=(6, 0))
+        reset_workflow_btn.grid(row=0, column=4, padx=(6, 0))
         self._register_i18n(reset_workflow_btn, "text", "step1.reset_workflow")
 
         step1_actions = ttk.LabelFrame(frame, text="Workflow / Abschluss Schritt 1", padding=(8, 6, 8, 6))
