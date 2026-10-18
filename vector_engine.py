@@ -28,6 +28,7 @@ from __future__ import annotations
 # Konturvereinfachung und der Export.
 
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
@@ -41,6 +42,15 @@ from PIL import Image, ImageTk, ImageDraw
 
 import ezdxf
 import svgwrite
+
+# OpenCV belegt sonst bei jeder großen Maske/Contour-Suche alle verfügbaren
+# Kerne. Vier Threads halten die UI und andere Programme benutzbar; die
+# vermiedenen Wiederholungsberechnungen liefern den größeren Geschwindigkeits-
+# gewinn als ungebremstes Parallelisieren.
+try:
+    cv2.setNumThreads(max(1, min(4, int(os.cpu_count() or 4))))
+except Exception:
+    pass
 
 
 @dataclass
@@ -380,8 +390,16 @@ def skeleton_neighbors(pixel: Tuple[int, int], pixels: set[Tuple[int, int]]) -> 
             if dx == 0 and dy == 0:
                 continue
             neighbor = (x + dx, y + dy)
-            if neighbor in pixels:
-                result.append(neighbor)
+            if neighbor not in pixels:
+                continue
+            # Eine diagonale Verbindung neben einer vorhandenen horizontalen
+            # oder vertikalen Verbindung bildet im Pixelraster ein Dreieck.
+            # Als Skelett-Graph würde das künstliche Knoten und sehr viele
+            # Mini-Pfade erzeugen. Echte diagonale Linien haben diese beiden
+            # Zwischenpixel nicht und bleiben deshalb erhalten.
+            if dx != 0 and dy != 0 and ((x + dx, y) in pixels or (x, y + dy) in pixels):
+                continue
+            result.append(neighbor)
     return result
 
 
@@ -1002,6 +1020,230 @@ def smart_smooth_contours(
             )
         )
     return smoothed
+
+
+def _fit_cad_line(points: List[Tuple[float, float]]) -> Optional[Tuple[np.ndarray, np.ndarray, float]]:
+    """Fit a total-least-squares line and return point, direction and max error."""
+    if len(points) < 2:
+        return None
+    data = np.asarray(points, dtype=np.float32).reshape(-1, 1, 2)
+    try:
+        vx, vy, x0, y0 = (float(value) for value in cv2.fitLine(data, cv2.DIST_L2, 0, 0.01, 0.01).reshape(-1))
+    except Exception:
+        return None
+    direction = np.asarray((vx, vy), dtype=float)
+    length = float(np.linalg.norm(direction))
+    if length <= 1e-9:
+        return None
+    direction /= length
+    origin = np.asarray((x0, y0), dtype=float)
+    errors = [
+        abs(float(direction[0] * (float(point[1]) - origin[1]) - direction[1] * (float(point[0]) - origin[0])))
+        for point in points
+    ]
+    return origin, direction, max(errors, default=0.0)
+
+
+def _line_intersection(
+    first: Tuple[np.ndarray, np.ndarray, float],
+    second: Tuple[np.ndarray, np.ndarray, float],
+) -> Optional[Tuple[float, float]]:
+    origin_a, direction_a, _ = first
+    origin_b, direction_b, _ = second
+    determinant = float(direction_a[0] * direction_b[1] - direction_a[1] * direction_b[0])
+    if abs(determinant) <= 1e-6:
+        return None
+    delta = origin_b - origin_a
+    factor = float((delta[0] * direction_b[1] - delta[1] * direction_b[0]) / determinant)
+    point = origin_a + factor * direction_a
+    return float(point[0]), float(point[1])
+
+
+def _project_to_line(point: Tuple[float, float], line: Tuple[np.ndarray, np.ndarray, float]) -> Tuple[float, float]:
+    origin, direction, _ = line
+    projected = origin + float(np.dot(np.asarray(point, dtype=float) - origin, direction)) * direction
+    return float(projected[0]), float(projected[1])
+
+
+def _regularize_confident_rectangle(
+    points: List[Tuple[float, float]],
+    raw_points: Optional[List[Tuple[float, float]]],
+    strength_percent: float = 70.0,
+) -> Optional[List[Tuple[float, float]]]:
+    """Return an exact rotated rectangle only for an unambiguous contour.
+
+    A one-pixel spur at a corner often produces a fifth polygon vertex.  Line
+    fitting alone must retain that vertex to stay conservative; a high-fill
+    minimum-area rectangle is a safer special case for CAD rectangles.
+    """
+    # Die bereits vereinfachte Kontur kann bei kleinem Epsilon trotz eines
+    # klaren Rechtecks viele Pixel-Eckpunkte enthalten. Entscheidend ist die
+    # Rohkontur mit ihrem eigenen robusten 4-Ecken-Fit, nicht diese Anzahl.
+    if not raw_points or len(raw_points) < 8 or len(points) < 3:
+        return None
+    raw = np.asarray(raw_points, dtype=np.float32).reshape(-1, 1, 2)
+    try:
+        contour_area = abs(float(cv2.contourArea(raw)))
+        (_center, (width, height), _angle) = cv2.minAreaRect(raw)
+    except Exception:
+        return None
+    if contour_area <= 4.0 or width * height <= 4.0:
+        return None
+    # First remove a very short raster spur.  The rectangle is then fitted to
+    # the four dominant corners rather than being enlarged by that one pixel.
+    epsilon = max(2.0, min(float(width), float(height)) * 0.02)
+    dominant = cv2.approxPolyDP(raw, epsilon, True)
+    # Neben kleinen Fasen können Raster-/Skalierungsartefakte auch mehrere
+    # kurze, versetzte Teilgeraden auf einer Rechteckseite erzeugen. Entschei-
+    # dend ist die nahezu volle Rechteckfläche, nicht die Zahl dieser Punkte.
+    if len(dominant) < 3:
+        return None
+    initial_box = cv2.boxPoints(cv2.minAreaRect(dominant)).astype(float)
+    axis_u = initial_box[1] - initial_box[0]
+    axis_v = initial_box[2] - initial_box[1]
+    length_u = float(np.linalg.norm(axis_u))
+    length_v = float(np.linalg.norm(axis_v))
+    if length_u <= 1e-6 or length_v <= 1e-6:
+        return None
+    axis_u /= length_u
+    axis_v /= length_v
+    # Bei fast horizontalen/vertikalen technischen Vorlagen darf ein einzelner
+    # Pixelversatz keine minimale Schräglage erzeugen. Wirklich gedrehte
+    # Rechtecke (mehr als 2°) bleiben dagegen unverändert gedreht.
+    axis_snap_limit = math.cos(math.radians(2.0))
+    if max(abs(float(axis_u[0])), abs(float(axis_u[1]))) >= axis_snap_limit:
+        if abs(float(axis_u[0])) >= abs(float(axis_u[1])):
+            axis_u = np.asarray((1.0 if axis_u[0] >= 0 else -1.0, 0.0))
+            axis_v = np.asarray((0.0, 1.0 if axis_v[1] >= 0 else -1.0))
+        else:
+            axis_u = np.asarray((0.0, 1.0 if axis_u[1] >= 0 else -1.0))
+            axis_v = np.asarray((1.0 if axis_v[0] >= 0 else -1.0, 0.0))
+    origin = np.mean(np.asarray(raw_points, dtype=float), axis=0)
+    offsets = np.asarray(raw_points, dtype=float) - origin
+    projected_u = offsets @ axis_u
+    projected_v = offsets @ axis_v
+    # A short corner spur has only a few samples. Trim it from the fitted
+    # rectangle while retaining the long, genuine sides.
+    low_u, high_u = np.percentile(projected_u, (2.0, 98.0))
+    low_v, high_v = np.percentile(projected_v, (2.0, 98.0))
+    rectangle_area = float((high_u - low_u) * (high_v - low_v))
+    if rectangle_area <= 4.0:
+        return None
+    # A rectangle fills its min-area rectangle almost completely.  This keeps
+    # trapezoids, arbitrary quadrilaterals and organic outlines untouched.
+    strength = max(0.0, min(100.0, float(strength_percent))) / 100.0
+    # Niedrige Stärke verlangt ein praktisch perfektes Rechteck. Höhere Werte
+    # akzeptieren zunehmend kleine Rasterfasen oder Eckausreißer.
+    min_fill_ratio = 0.995 - 0.085 * strength
+    max_fill_ratio = 1.010 + 0.070 * strength
+    fill_ratio = contour_area / rectangle_area
+    if fill_ratio < min_fill_ratio or fill_ratio > max_fill_ratio:
+        return None
+    corners = [
+        origin + low_u * axis_u + low_v * axis_v,
+        origin + high_u * axis_u + low_v * axis_v,
+        origin + high_u * axis_u + high_v * axis_v,
+        origin + low_u * axis_u + high_v * axis_v,
+    ]
+    return [(float(x), float(y)) for x, y in corners]
+
+
+def regularize_cad_geometry_contour(
+    points: List[Tuple[float, float]],
+    closed: bool,
+    raw_points: Optional[List[Tuple[float, float]]] = None,
+    line_tolerance_px: float = 1.25,
+    strength_percent: float = 70.0,
+) -> List[Tuple[float, float]]:
+    """Replace confidently straight raster sections with exact CAD lines.
+
+    This deliberately declines uncertain shapes: it is a corrective CAD pass,
+    not a generic polygon simplifier.  Open paths are straightened only when
+    their complete skeleton path is already close to a single line.  Closed
+    contours are corrected only when their simplified corners can be mapped to
+    clean raw contour sections; adjacent fitted lines then define each corner.
+    """
+    source = raw_points if raw_points and len(raw_points) >= 2 else points
+    if len(points) < 2 or len(source) < 2:
+        return points
+    strength = max(0.0, min(100.0, float(strength_percent))) / 100.0
+    tolerance = max(0.05, float(line_tolerance_px)) * (0.35 + 1.15 * strength)
+
+    if not closed:
+        line = _fit_cad_line(source)
+        if line is None or line[2] > tolerance:
+            return points
+        start = _project_to_line(source[0], line)
+        end = _project_to_line(source[-1], line)
+        if point_distance(start, end) <= 0.25:
+            return points
+        return [start, end]
+
+    rectangle = _regularize_confident_rectangle(points, raw_points, strength_percent=strength_percent)
+    if rectangle is not None:
+        return rectangle
+
+    if len(points) < 3 or len(points) > 12 or not raw_points or len(raw_points) < len(points) * 2:
+        return points
+
+    raw = [(float(x), float(y)) for x, y in raw_points]
+    raw_count = len(raw)
+    # ApproxPolyDP vertices originate on the raw contour.  Mapping each one to
+    # its nearest raw point gives the pixel samples belonging to its side.
+    indices = [min(range(raw_count), key=lambda idx: point_distance(vertex, raw[idx])) for vertex in points]
+    unwrapped = [indices[0]]
+    for index in indices[1:]:
+        while index <= unwrapped[-1]:
+            index += raw_count
+        unwrapped.append(index)
+    if unwrapped[-1] - unwrapped[0] >= raw_count:
+        return points
+
+    lines: List[Tuple[np.ndarray, np.ndarray, float]] = []
+    for index, start in enumerate(unwrapped):
+        end = unwrapped[(index + 1) % len(unwrapped)]
+        if index == len(unwrapped) - 1:
+            end += raw_count
+        section = [raw[pos % raw_count] for pos in range(start, end + 1)]
+        line = _fit_cad_line(section)
+        if line is None or len(section) < 2 or line[2] > tolerance:
+            return points
+        lines.append(line)
+
+    corrected: List[Tuple[float, float]] = []
+    max_corner_shift = max(2.0, tolerance * 4.0)
+    for index, original in enumerate(points):
+        intersection = _line_intersection(lines[(index - 1) % len(lines)], lines[index])
+        if intersection is None or point_distance(original, intersection) > max_corner_shift:
+            return points
+        corrected.append(intersection)
+    return corrected
+
+
+def regularize_cad_geometry_contours(
+    contours: List[DetectedContour],
+    line_tolerance_px: float = 1.25,
+    strength_percent: float = 70.0,
+) -> List[DetectedContour]:
+    """Apply conservative line and corner reconstruction to detected paths."""
+    result: List[DetectedContour] = []
+    for contour in contours:
+        corrected = regularize_cad_geometry_contour(
+            contour.points,
+            closed=contour.closed,
+            raw_points=contour.raw_points,
+            line_tolerance_px=line_tolerance_px,
+            strength_percent=strength_percent,
+        )
+        result.append(DetectedContour(
+            rule=contour.rule,
+            points=corrected,
+            area=contour.area,
+            closed=contour.closed,
+            is_hole=contour.is_hole,
+            raw_points=contour.raw_points,
+        ))
+    return result
 
 
 def scale_hole_contours(
@@ -1680,9 +1922,18 @@ def find_centerlines_for_rule(
     mask = calm_mask_edges(mask, mask_edge_smoothing, mask_noise_area)
     point_scale = 1.0
     height, width = mask.shape[:2]
+    # Skeletonisierung und die anschließende Python-Graphverfolgung wachsen
+    # überproportional mit der Bildfläche. Die spätere Rückskalierung erhält
+    # die Lage der Mittellinie, verhindert aber UI-Hänger bei großen Scans.
     max_dim = max(height, width)
-    if max_dim > 1400:
-        point_scale = max_dim / 1400.0
+    max_work_dim = 1200.0
+    max_work_pixels = 1_600_000.0
+    point_scale = max(
+        1.0,
+        max_dim / max_work_dim,
+        math.sqrt((height * width) / max_work_pixels),
+    )
+    if point_scale > 1.0:
         new_width = max(1, int(round(width / point_scale)))
         new_height = max(1, int(round(height / point_scale)))
         mask = cv2.resize(mask, (new_width, new_height), interpolation=cv2.INTER_NEAREST)
@@ -1769,6 +2020,13 @@ def detect_all_contours(
         if progress_callback is not None:
             progress_callback(index / total_rules)
 
+        if not rule.export:
+            # Ignore-Farben dienen nur der Masken-/Farbvorschau. Ihre Konturen
+            # werden weder exportiert noch für die CAD-Geometrie benötigt;
+            # insbesondere ein weißer Hintergrund kostet sonst viel CPU/RAM.
+            if progress_callback is not None:
+                progress_callback((index + 1) / total_rules)
+            continue
         if centerline_mode:
             all_contours.extend(
                 find_centerlines_for_rule(
@@ -1820,7 +2078,8 @@ def export_svg(
     fill_closed_shapes: bool = False,
     use_bezier: bool = False,
     group_connected_paths: bool = False,
-    force_color_layers: bool = False
+    force_color_layers: bool = False,
+    mask_fill_colors: Optional[Dict[int, Tuple[int, int, int]]] = None
 ) -> None:
     width_px, height_px = image_size
     width_mm = width_px * pixel_to_mm
@@ -1834,18 +2093,35 @@ def export_svg(
 
     groups: Dict[str, Any] = {}
 
+    def fill_rgb_for(item: DetectedContour) -> Tuple[int, int, int]:
+        # Schlüssel ist id(item.rule), nicht id(item): Löcher teilen sich die
+        # Regel ihrer Außenkontur und müssen dieselbe Füllfarbe bekommen, sonst
+        # bricht die evenodd-Gruppierung (siehe _build_mask_fill_colors).
+        if mask_fill_colors is not None:
+            override = mask_fill_colors.get(id(item.rule))
+            if override is not None:
+                return override
+        return item.rule.rgb
+
     if fill_closed_shapes:
         # Gefüllte SVGs brauchen bei Innenlöchern eine zusammengesetzte Pfadstruktur.
         # Mehrere getrennt gefüllte Einzelpfade würden Löcher wieder zufüllen.
         # evenodd ist nicht perfekt für alle überlappenden Sonderfälle, aber deutlich
         # robuster als jedes Polygon einzeln zu füllen.
-        layer_paths: Dict[str, list[str]] = {}
-        layer_colors: Dict[str, str] = {}
+        # Gruppierung nach (Layer, Farbe) statt nur Layer: mehrere Regeln, die
+        # denselben Layer-Namen teilen, dürfen sich sonst gegenseitig die Füllfarbe
+        # überschreiben (nur die zuletzt verarbeitete Regel hätte gewonnen).
+        layer_paths: Dict[Tuple[str, str], list[str]] = {}
+        layer_colors: Dict[Tuple[str, str], str] = {}
+        layer_group_ids: Dict[Tuple[str, str], str] = {}
 
         for item in contours:
             if not item.rule.export:
                 continue
             layer = color_layer_for_rule(item.rule, force_color_layers=force_color_layers)
+            fill_color = fill_rgb_for(item)
+            color_hex = rgb_to_hex(fill_color)
+            group_key = (layer, color_hex)
             if layer not in groups:
                 groups[layer] = dwg.g(id=layer)
                 dwg.add(groups[layer])
@@ -1854,31 +2130,33 @@ def export_svg(
                 continue
             path_data = build_bezier_path(scaled, item.closed) if use_bezier else build_polyline_path(scaled, item.closed)
             if item.closed and len(scaled) >= 3:
-                layer_paths.setdefault(layer, []).append(path_data)
-                layer_colors[layer] = rgb_to_hex(item.rule.rgb)
+                layer_paths.setdefault(group_key, []).append(path_data)
+                layer_colors[group_key] = color_hex
+                layer_group_ids[group_key] = layer
             elif not group_connected_paths:
                 groups[layer].add(
                     dwg.path(
                         d=path_data,
                         fill="none",
-                        stroke=rgb_to_hex(item.rule.rgb),
+                        stroke=color_hex,
                         stroke_width=max(0.05, pixel_to_mm)
                     )
                 )
 
         if group_connected_paths:
             for group_index, group_contours in enumerate(group_connected_contours(contours)):
-                parts_by_layer: Dict[str, list[str]] = {}
-                colors_by_layer: Dict[str, str] = {}
+                parts_by_key: Dict[Tuple[str, str], list[str]] = {}
                 for item in group_contours:
                     layer = color_layer_for_rule(item.rule, force_color_layers=force_color_layers)
                     scaled = [(x * pixel_to_mm, y * pixel_to_mm) for x, y in item.points]
                     if not scaled:
                         continue
                     path_data = build_bezier_path(scaled, item.closed) if use_bezier else build_polyline_path(scaled, item.closed)
-                    parts_by_layer.setdefault(layer, []).append(path_data)
-                    colors_by_layer[layer] = rgb_to_hex(item.rule.rgb)
-                for layer, parts in parts_by_layer.items():
+                    color_hex = rgb_to_hex(fill_rgb_for(item))
+                    key = (layer, color_hex)
+                    parts_by_key.setdefault(key, []).append(path_data)
+                for key, parts in parts_by_key.items():
+                    layer, color_hex = key
                     if layer not in groups:
                         groups[layer] = dwg.g(id=layer)
                         dwg.add(groups[layer])
@@ -1886,20 +2164,21 @@ def export_svg(
                     object_group.add(
                         dwg.path(
                             d=" ".join(parts),
-                            fill=colors_by_layer.get(layer, "#000000"),
-                            stroke=colors_by_layer.get(layer, "#000000"),
+                            fill=color_hex,
+                            stroke=color_hex,
                             stroke_width=max(0.05, pixel_to_mm),
                             **{"fill-rule": "evenodd"}
                         )
                     )
                     groups[layer].add(object_group)
         else:
-            for layer, parts in layer_paths.items():
+            for group_key, parts in layer_paths.items():
+                layer = layer_group_ids[group_key]
                 groups[layer].add(
                     dwg.path(
                         d=" ".join(parts),
-                        fill=layer_colors.get(layer, "#000000"),
-                        stroke=layer_colors.get(layer, "#000000"),
+                        fill=layer_colors.get(group_key, "#000000"),
+                        stroke=layer_colors.get(group_key, "#000000"),
                         stroke_width=max(0.05, pixel_to_mm),
                         **{"fill-rule": "evenodd"}
                     )

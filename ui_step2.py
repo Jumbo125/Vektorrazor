@@ -242,6 +242,7 @@ def _build_step2(self) -> None:
         self.profile_box = ttk.Combobox(colors_bar, textvariable=self.profile_var, values=list(vector.PROFILE_ROWS.keys()), state="readonly", width=18)
         self.profile_box.grid(row=0, column=2, sticky="w")
         self.profile_box.bind("<<ComboboxSelected>>", lambda _event: self.on_profile_selected())
+        ttk.Button(colors_bar, text="Diagnose", command=self.refresh_vector_diagnostics).grid(row=0, column=3, sticky="w", padx=(8, 0))
         self.vector_color_count_var = tk.StringVar(value="")
         ttk.Label(colors_bar, textvariable=self.vector_color_count_var, foreground="#555").grid(row=0, column=4, sticky="w", padx=(12, 0))
         ttk.Label(
@@ -357,8 +358,38 @@ def _build_step2(self) -> None:
         self.vector_mode_box = ttk.Combobox(opts, textvariable=self.vector_mode_display_var, values=[self._mode_label(key) for key in VECTOR_MODE_KEYS], state="readonly", width=20)
         self.vector_mode_box.grid(row=0, column=1, sticky="w", padx=(4, 12))
         self.vector_mode_box.bind("<<ComboboxSelected>>", lambda _event: self.on_vector_mode_display_changed())
+        self.geometry_correction_check = ttk.Checkbutton(
+            opts,
+            text="Geometrische CAD-Korrektur (Geraden/Ecken)",
+            variable=self.geometry_correction_var,
+            command=self._schedule_live_preview_if_enabled,
+        )
+        self.geometry_correction_check.grid(row=0, column=2, columnspan=2, sticky="w")
+        self._add_tooltip(self.geometry_correction_check, "tooltip.step2.geometry_correction")
         ttk.Label(opts, text="Linien zusammenführen px").grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(opts, textvariable=self.centerline_merge_px_var, width=8).grid(row=1, column=1, sticky="w", padx=(4, 0), pady=(6, 0))
+        ttk.Label(opts, text="CAD-Korrektur-Stärke %").grid(row=1, column=2, sticky="w", padx=(12, 4), pady=(6, 0))
+        geometry_strength_scale = ttk.Scale(
+            opts,
+            from_=0,
+            to=100,
+            variable=self.geometry_correction_strength_var,
+            orient="horizontal",
+        )
+        geometry_strength_scale.grid(row=1, column=3, sticky="ew", padx=(0, 4), pady=(6, 0))
+        geometry_strength_scale.bind("<ButtonRelease-1>", lambda _event: self._schedule_live_preview_if_enabled())
+        geometry_strength_spin = ttk.Spinbox(
+            opts,
+            from_=0,
+            to=100,
+            increment=1,
+            textvariable=self.geometry_correction_strength_var,
+            width=5,
+            format="%.0f",
+        )
+        geometry_strength_spin.grid(row=1, column=4, sticky="w", pady=(6, 0))
+        geometry_strength_spin.bind("<Return>", lambda _event: self._schedule_live_preview_if_enabled())
+        geometry_strength_spin.bind("<FocusOut>", lambda _event: self._schedule_live_preview_if_enabled())
         ttk.Checkbutton(opts, text="Nur geschlossene Pfade", variable=self.closed_paths_only_var).grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
         ttk.Checkbutton(opts, text="Zusammenhängende Pfade gruppieren (SVG)", variable=self.group_connected_paths_var).grid(row=3, column=0, columnspan=4, sticky="w", pady=(2, 0))
         ttk.Checkbutton(opts, text="SVG-Flächen füllen (Export)", variable=self.fill_closed_shapes_var).grid(row=28, column=0, columnspan=2, sticky="w", pady=(8, 0))
@@ -739,6 +770,12 @@ def _build_step2(self) -> None:
         )
         self.scale_export_action_btn.grid(row=0, column=3, sticky="w", padx=(0, 12))
         self._register_i18n(self.scale_export_action_btn, "text", "step2.export_scaled")
+
+        ttk.Checkbutton(
+            bottom_actions,
+            text="Export wie Farbmaske einfärben",
+            variable=self.export_color_like_mask_var
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
         panes.add(settings, weight=2)
         panes.add(preview, weight=5)

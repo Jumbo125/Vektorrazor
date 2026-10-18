@@ -39,7 +39,7 @@ from __future__ import annotations
 
 
 from pathlib import Path
-from typing import Optional, Tuple, List, Any
+from typing import Optional, Tuple, List, Any, Dict
 import sys
 import math
 import json
@@ -526,6 +526,7 @@ class WorkflowApp(tk.Tk):
         self.centerline_merge_px_var = tk.StringVar(value="0")
         self.closed_paths_only_var = tk.BooleanVar(value=False)
         self.fill_closed_shapes_var = tk.BooleanVar(value=False)
+        self.export_color_like_mask_var = tk.BooleanVar(value=False)
         self.group_connected_paths_var = tk.BooleanVar(value=True)
         self.force_color_layers_var = tk.BooleanVar(value=True)
         self.object_layers_dxf_var = tk.BooleanVar(value=False)
@@ -547,6 +548,8 @@ class WorkflowApp(tk.Tk):
         self.internal_scale_var = tk.StringVar(value="2")
         self.internal_scale_display_var = tk.StringVar()
         self.smart_smoothing_var = tk.BooleanVar(value=False)
+        self.geometry_correction_var = tk.BooleanVar(value=False)
+        self.geometry_correction_strength_var = tk.DoubleVar(value=70.0)
         self.smart_corner_angle_var = tk.StringVar(value="45")
         self.smart_line_tolerance_var = tk.StringVar(value="1.0")
         self.smart_curve_strength_var = tk.StringVar(value="2")
@@ -555,13 +558,16 @@ class WorkflowApp(tk.Tk):
         self.bridge_width_mm_var = tk.StringVar(value="1.000")
         self.bridge_width_percent_var = tk.StringVar(value="0.000")
         self.bridge_count_var = tk.StringVar(value="2.000")
-        self.live_preview_var = tk.BooleanVar(value=True)
+        self.live_preview_var = tk.BooleanVar(value=False)
         self.cleanup_mode_var = tk.StringVar(value="off")
         self.cleanup_mode_display_var = tk.StringVar()
         self.min_object_area_mm2_var = tk.StringVar(value="0")
         self.min_object_percent_var = tk.StringVar(value="0,00")
         self.detected_contours: List[Any] = []
+        self.last_detected_contours_before_cleanup: List[Any] = []
         self.last_rules: List[Any] = []
+        self._vector_detection_cache_key: Optional[tuple[Any, ...]] = None
+        self._vector_detection_cache_contours: List[Any] = []
         self.selected_contour_index: Optional[int] = None
         self.selected_contour_indices: set[int] = set()
         self.vector_select_press: Optional[Tuple[int, int, str]] = None
@@ -832,7 +838,7 @@ class WorkflowApp(tk.Tk):
         self.dxf_compatibility_var.set(profile if profile in DXF_COMPATIBILITY_KEYS else "default")
         version = str(export_config.get("dxf_version", "R2000"))
         self.dxf_version_var.set(_dxf_choice_for_version(version))
-        self.live_preview_var.set(bool(export_config.get("live_preview", True)))
+        self.live_preview_var.set(bool(export_config.get("live_preview", False)))
         paths_config = self.user_config.get("paths", {})
         ai_model = str(paths_config.get("ai_upscale_model", ""))
         if ai_model:
@@ -955,6 +961,8 @@ class WorkflowApp(tk.Tk):
             self.preprocess_vector_var,
             self.internal_scale_var,
             self.smart_smoothing_var,
+            self.geometry_correction_var,
+            self.geometry_correction_strength_var,
             self.bridge_tabs_var,
             self.cleanup_mode_var,
         ]
@@ -1630,6 +1638,11 @@ class WorkflowApp(tk.Tk):
             self.smooth_contours_var.set(False)
             self.smooth_strength_var.set("0.000")
             self.smart_smoothing_var.set(True)
+            # Logo ist das CAD-/klare-Formen-Profil: Linien, Rechtecke und
+            # künftig weitere sichere Primitive sollen dort direkt bereinigt
+            # werden. Die Checkbox bleibt sichtbar und kann jederzeit aus.
+            self.geometry_correction_var.set(True)
+            self.geometry_correction_strength_var.set(75.0)
             self.smart_corner_angle_var.set("25.000")
             self.smart_line_tolerance_var.set("2.000")
             self.smart_curve_strength_var.set("1.000")
@@ -1644,6 +1657,8 @@ class WorkflowApp(tk.Tk):
             self.smooth_contours_var.set(False)
             self.smooth_strength_var.set("0.000")
             self.smart_smoothing_var.set(False)
+            self.geometry_correction_var.set(False)
+            self.geometry_correction_strength_var.set(55.0)
             self.smart_corner_angle_var.set("35.000")
             self.smart_line_tolerance_var.set("0.600")
             self.smart_curve_strength_var.set("0.000")
@@ -1658,6 +1673,8 @@ class WorkflowApp(tk.Tk):
             self.smooth_contours_var.set(False)
             self.smooth_strength_var.set("0.000")
             self.smart_smoothing_var.set(True)
+            self.geometry_correction_var.set(False)
+            self.geometry_correction_strength_var.set(65.0)
             self.smart_corner_angle_var.set("42.000")
             self.smart_line_tolerance_var.set("0.850")
             self.smart_curve_strength_var.set("0.800")
@@ -1961,7 +1978,7 @@ class WorkflowApp(tk.Tk):
                 child.grid_remove()
                 continue
             if simple:
-                if row in (0, 1, 2, 3, 4, 9, 14):
+                if row in (0, 1, 2, 3, 4, 9, 13, 14):
                     child.grid()
                 else:
                     child.grid_remove()
@@ -2251,6 +2268,8 @@ class WorkflowApp(tk.Tk):
         self.internal_scale_display_var.set(self._internal_scale_label("3"))
         self.smooth_contours_var.set(False)
         self.smart_smoothing_var.set(False)
+        self.geometry_correction_var.set(False)
+        self.geometry_correction_strength_var.set(70.0)
         self.unique_cad_lines_var.set(False)
         self.cleanup_mode_var.set("off")
         try:
@@ -3029,6 +3048,126 @@ class WorkflowApp(tk.Tk):
             self._run_step1_auto_after_load = True
             self.load_input_image(path)
 
+    def choose_input_pdf(self) -> None:
+        """PDF-Seite auswählen und als hochauflösendes Rasterbild übernehmen."""
+        path = filedialog.askopenfilename(
+            title="PDF laden",
+            initialdir=self._initial_dir_from_config("input"),
+            filetypes=[("PDF-Dateien", "*.pdf"), ("Alle Dateien", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            import pymupdf as fitz
+            document = fitz.open(path)
+        except Exception as exc:
+            messagebox.showerror(
+                "PDF konnte nicht geöffnet werden",
+                "Für den PDF-Import wird PyMuPDF benötigt.\n\n"
+                f"{exc}\n\nInstallieren mit: .\\.venv\\Scripts\\python.exe -m pip install -r requirements.txt",
+            )
+            return
+        if document.page_count < 1:
+            document.close()
+            messagebox.showerror("PDF konnte nicht geöffnet werden", "Das PDF enthält keine Seiten.")
+            return
+        self._open_pdf_page_dialog(Path(path), document)
+
+    def _open_pdf_page_dialog(self, pdf_path: Path, document: Any) -> None:
+        """Modalen Dialog für Seitenauswahl mit gerenderter Vorschau anzeigen."""
+        import pymupdf as fitz
+
+        dialog = tk.Toplevel(self)
+        dialog.title("PDF-Seite auswählen")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.geometry("820x780")
+        dialog.minsize(540, 480)
+        page_var = tk.IntVar(value=1)
+        preview_label = ttk.Label(dialog, anchor="center")
+        preview_label.image = None
+
+        top = ttk.Frame(dialog, padding=12)
+        top.pack(fill="x")
+        ttk.Label(top, text=f"{pdf_path.name}  –  {document.page_count} Seiten").pack(side="left")
+        ttk.Label(top, text="Seite:").pack(side="left", padx=(22, 5))
+        spinner = ttk.Spinbox(top, from_=1, to=document.page_count, textvariable=page_var, width=7)
+        spinner.pack(side="left")
+        ttk.Button(top, text="Vorschau aktualisieren", command=lambda: render_preview()).pack(side="left", padx=8)
+        preview_label.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        bottom = ttk.Frame(dialog, padding=(12, 0, 12, 12))
+        bottom.pack(fill="x")
+
+        def close_dialog() -> None:
+            try:
+                document.close()
+            finally:
+                dialog.destroy()
+
+        def render_page(page_number: int, dpi: int) -> Image.Image:
+            page = document.load_page(page_number - 1)
+            # RGB spart gegenüber RGBA ein Viertel des Speichers. Transparente
+            # PDF-Elemente werden im bestehenden Workflow auf Weiß abgeflacht.
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72), alpha=False)
+            return Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+
+        def safe_render_dpi(page_number: int) -> int:
+            """300 dpi beibehalten, große Planformate aber vor Speicherabbruch schützen."""
+            page = document.load_page(page_number - 1)
+            target_dpi = 300
+            max_pixels = 12_000_000
+            pixels_at_target = (page.rect.width * target_dpi / 72) * (page.rect.height * target_dpi / 72)
+            if pixels_at_target <= max_pixels:
+                return target_dpi
+            return max(72, int(target_dpi * math.sqrt(max_pixels / pixels_at_target)))
+
+        def render_preview(*_args: Any) -> None:
+            try:
+                page_number = min(document.page_count, max(1, int(page_var.get())))
+                page_var.set(page_number)
+                image = render_page(page_number, 110)
+                image.thumbnail((760, 620), Image.Resampling.LANCZOS)
+                preview = ImageTk.PhotoImage(image)
+                preview_label.configure(image=preview, text="")
+                preview_label.image = preview
+            except Exception as exc:
+                preview_label.configure(image="", text=f"Vorschau konnte nicht erstellt werden:\n{exc}")
+                preview_label.image = None
+
+        def use_page() -> None:
+            try:
+                page_number = min(document.page_count, max(1, int(page_var.get())))
+                # 300 dpi ergibt eine für die anschließende Vektorisierung geeignete Rasterauflösung.
+                dpi = safe_render_dpi(page_number)
+                dialog.configure(cursor="watch")
+                preview_label.configure(text=f"Seite wird mit {dpi} dpi geladen …", image="")
+                dialog.update_idletasks()
+                image = render_page(page_number, dpi)
+            except Exception as exc:
+                dialog.configure(cursor="")
+                messagebox.showerror("PDF-Seite konnte nicht gerendert werden", str(exc), parent=dialog)
+                return
+            document.close()
+            dialog.destroy()
+            self._remember_input_path(str(pdf_path))
+            source_name = pdf_path.with_name(f"{pdf_path.stem} – Seite {page_number}.png")
+            self._run_step1_auto_after_load = True
+            try:
+                self.load_input_pil_image(image, source_name)
+                if dpi < 300:
+                    self.status_var.set(
+                        f"PDF-Seite {page_number} geladen ({dpi} dpi; für das große Seitenformat angepasst)."
+                    )
+            except Exception as exc:
+                messagebox.showerror("PDF-Seite konnte nicht übernommen werden", str(exc), parent=self)
+
+        ttk.Button(bottom, text="Abbrechen", command=close_dialog).pack(side="right")
+        ttk.Button(bottom, text="Seite verwenden", command=use_page).pack(side="right", padx=(0, 8))
+        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+        spinner.bind("<Return>", render_preview)
+        render_preview()
+
     def load_input_image(self, path: str) -> None:
         self.show_busy_dialog(tr("msg.busy_load_image_title"), tr("msg.busy_load_image_body"))
         try:
@@ -3038,8 +3177,17 @@ class WorkflowApp(tk.Tk):
             except Exception as exc:
                 messagebox.showerror(tr("msg.load_error"), str(exc))
                 return
+            self.load_input_pil_image(img, Path(path), manage_busy_dialog=False)
+        finally:
+            self.close_busy_dialog()
+
+    def load_input_pil_image(self, img: Image.Image, source_path: Path, manage_busy_dialog: bool = True) -> None:
+        """Ein bereits geladenes Rasterbild in den normalen Schritt-1-Workflow übernehmen."""
+        if manage_busy_dialog:
+            self.show_busy_dialog(tr("msg.busy_load_image_title"), tr("msg.busy_load_image_body"))
+        try:
             self.set_progress(35, tr("progress.prepare_image"))
-            self.current_path = Path(path)
+            self.current_path = source_path
             self.original_image = img
             self._update_ai_upscale_original_size_label()
             flat_rgb = np.array(_flatten_rgba_to_rgb(img))
@@ -3062,7 +3210,8 @@ class WorkflowApp(tk.Tk):
                 self.output_path_var.set(str(self.current_path.with_suffix(".dxf")))
             self.set_progress(100, tr("status.image_loaded", name=self.current_path.name, width=img.width, height=img.height))
         finally:
-            self.close_busy_dialog()
+            if manage_busy_dialog:
+                self.close_busy_dialog()
 
         if self._perfect_bw_source:
             if messagebox.askyesno(tr("msg.perfect_bw_title"), tr("msg.step1_recommend_existing_bw"), default=messagebox.YES, icon=messagebox.QUESTION):
@@ -3184,6 +3333,7 @@ class WorkflowApp(tk.Tk):
             self.centerline_merge_px_var.set("0")
             self.closed_paths_only_var.set(False)
             self.fill_closed_shapes_var.set(False)
+            self.export_color_like_mask_var.set(False)
             self.group_connected_paths_var.set(True)
             self.force_color_layers_var.set(True)
             self.object_layers_dxf_var.set(False)
@@ -3205,6 +3355,8 @@ class WorkflowApp(tk.Tk):
             self.internal_scale_var.set("2")
             self.internal_scale_display_var.set(self._internal_scale_label("2"))
             self.smart_smoothing_var.set(False)
+            self.geometry_correction_var.set(False)
+            self.geometry_correction_strength_var.set(70.0)
             self.smart_corner_angle_var.set("45")
             self.smart_line_tolerance_var.set("1.0")
             self.smart_curve_strength_var.set("2")
@@ -3213,7 +3365,7 @@ class WorkflowApp(tk.Tk):
             self.bridge_width_mm_var.set("1.000")
             self.bridge_width_percent_var.set("0.000")
             self.bridge_count_var.set("2.000")
-            self.live_preview_var.set(True)
+            self.live_preview_var.set(False)
             self.cleanup_mode_var.set("off")
             self.cleanup_mode_display_var.set(self._cleanup_label("off"))
             self.min_object_area_mm2_var.set("0")
@@ -3259,6 +3411,9 @@ class WorkflowApp(tk.Tk):
         self.vector_image_rgb = None
         self.vector_source_from_step1 = False
         self.detected_contours = []
+        self.last_detected_contours_before_cleanup = []
+        self._vector_detection_cache_key = None
+        self._vector_detection_cache_contours = []
         self.last_rules = []
         self.selected_contour_index = None
         self.selected_contour_indices.clear()
@@ -3359,6 +3514,7 @@ class WorkflowApp(tk.Tk):
 
         self.preprocess_vector_var.set(False)
         self.smart_smoothing_var.set(False)
+        self.geometry_correction_var.set(False)
         self.closed_paths_only_var.set(False)
 
         text_logo = near_bw > 0.72 and dyn > 105 and edge_density > 0.035
@@ -4577,6 +4733,9 @@ class WorkflowApp(tk.Tk):
         self.vector_image_rgb = np.array(rgb_image)
         self.vector_source_from_step1 = True
         self.detected_contours = []
+        self.last_detected_contours_before_cleanup = []
+        self._vector_detection_cache_key = None
+        self._vector_detection_cache_contours = []
         self.selected_contour_index = None
         self.selected_contour_indices.clear()
         self._step1_transferred_color_rules = False
@@ -5704,6 +5863,8 @@ class WorkflowApp(tk.Tk):
         try:
             img = Image.open(path).convert("RGB")
             self.vector_image_rgb = np.array(img)
+            self._vector_detection_cache_key = None
+            self._vector_detection_cache_contours = []
             self.vector_source_from_step1 = False
             self.step2_auto_prompt_pending = True
             self.vector_source_name_var.set(Path(path).name)
@@ -5922,6 +6083,22 @@ class WorkflowApp(tk.Tk):
             curve_smoothing_strength=self.get_smart_curve_strength(),
         )
 
+    def apply_geometry_correction_if_enabled(self, contours: List[Any]) -> List[Any]:
+        """Straighten confident CAD lines and compute clean corner intersections."""
+        if not self.geometry_correction_var.get():
+            return contours
+        return vector.regularize_cad_geometry_contours(
+            contours,
+            line_tolerance_px=self.get_smart_line_tolerance_px(),
+            strength_percent=self.get_geometry_correction_strength(),
+        )
+
+    def get_geometry_correction_strength(self) -> float:
+        try:
+            return max(0.0, min(100.0, float(self.geometry_correction_strength_var.get())))
+        except Exception:
+            return 70.0
+
     def apply_circle_regularization_if_suitable(self, contours: List[Any]) -> List[Any]:
         # Automatische Kreis-/Ellipsen-Normalisierung greift bei freien Logoformen
         # zu aggressiv. Kreisfit darf nur als später bewusstes Spezialwerkzeug laufen.
@@ -6071,6 +6248,58 @@ class WorkflowApp(tk.Tk):
         print("\n[Vektorrazor Diagnose]\n" + details + "\n")
         return compact
 
+    def refresh_vector_diagnostics(self) -> None:
+        """Run the expensive per-rule diagnostics only on explicit request."""
+        if self.vector_image_rgb is None or not self.last_rules:
+            self.vector_diagnostics_var.set("Diagnose: zuerst Vorschau aktualisieren.")
+            return
+        self._update_vector_diagnostics(
+            self.last_rules,
+            self.last_detected_contours_before_cleanup,
+            self.detected_contours,
+            self.vector_mode_var.get() == "centerline",
+        )
+
+    @staticmethod
+    def _clone_detected_contours(contours: List[Any]) -> List[Any]:
+        """Keep cache entries immutable from later cleanup/edit operations."""
+        return [
+            vector.DetectedContour(
+                rule=item.rule,
+                points=list(item.points),
+                area=float(item.area),
+                closed=bool(item.closed),
+                is_hole=bool(item.is_hole),
+                raw_points=list(item.raw_points) if item.raw_points else None,
+            )
+            for item in contours
+        ]
+
+    def _vector_detection_key(self, rules: List[Any], centerline_mode: bool) -> tuple[Any, ...]:
+        """Only inputs affecting raw contour detection belong in this cache key."""
+        rule_key = tuple(
+            (
+                tuple(int(value) for value in rule.rgb),
+                round(float(rule.tolerance), 4),
+                int(rule.min_area),
+                round(float(rule.epsilon), 4),
+                bool(rule.export),
+            )
+            for rule in rules
+        )
+        return (
+            id(self.vector_image_rgb),
+            centerline_mode,
+            bool(self.closed_paths_only_var.get()),
+            round(self.get_centerline_merge_px(), 4),
+            bool(self.preprocess_vector_var.get()),
+            round(self.get_preprocess_blur(), 4),
+            round(self.get_preprocess_edge_smoothing(), 4),
+            round(self.get_preprocess_noise_area(), 4),
+            self.get_internal_scale(),
+            rule_key,
+        )
+
     def detect_and_preview_vector(self, live: bool = False) -> None:
         if self.vector_image_rgb is None:
             messagebox.showwarning(tr("msg.no_intermediate_title"), tr("msg.no_intermediate_step"))
@@ -6093,21 +6322,30 @@ class WorkflowApp(tk.Tk):
                 self._raise_if_cancel_requested()
                 self.set_progress(10 + fraction * 65, tr("progress.detecting_contours"))
 
-            contours = vector.detect_all_contours(
-                self.vector_image_rgb,
-                rules,
-                closed_paths_only=self.closed_paths_only_var.get() and not centerline_mode,
-                remove_loose_points=False,
-                smooth_iterations=0,
-                centerline_mode=centerline_mode,
-                centerline_merge_px=self.get_centerline_merge_px(),
-                preprocess_enabled=self.preprocess_vector_var.get(),
-                preprocess_blur=self.get_preprocess_blur(),
-                preprocess_edge_smoothing=self.get_preprocess_edge_smoothing(),
-                preprocess_noise_area=self.get_preprocess_noise_area(),
-                internal_scale=self.get_internal_scale(),
-                progress_callback=progress_step
-            )
+            detection_key = self._vector_detection_key(rules, centerline_mode)
+            cache_hit = detection_key == self._vector_detection_cache_key
+            if cache_hit:
+                contours = self._clone_detected_contours(self._vector_detection_cache_contours)
+                self.set_progress(75, "Erkennung aus Cache")
+            else:
+                contours = vector.detect_all_contours(
+                    self.vector_image_rgb,
+                    rules,
+                    closed_paths_only=self.closed_paths_only_var.get() and not centerline_mode,
+                    remove_loose_points=False,
+                    smooth_iterations=0,
+                    centerline_mode=centerline_mode,
+                    centerline_merge_px=self.get_centerline_merge_px(),
+                    preprocess_enabled=self.preprocess_vector_var.get(),
+                    preprocess_blur=self.get_preprocess_blur(),
+                    preprocess_edge_smoothing=self.get_preprocess_edge_smoothing(),
+                    preprocess_noise_area=self.get_preprocess_noise_area(),
+                    internal_scale=self.get_internal_scale(),
+                    progress_callback=progress_step
+                )
+                self._vector_detection_cache_key = detection_key
+                self._vector_detection_cache_contours = self._clone_detected_contours(contours)
+            self.last_detected_contours_before_cleanup = list(contours)
             self._raise_if_cancel_requested()
             before = len(contours)
             self.set_progress(80, tr("progress.filter_small_objects"))
@@ -6122,6 +6360,7 @@ class WorkflowApp(tk.Tk):
             )
             self.detected_contours = self.apply_manual_smoothing_if_enabled(self.detected_contours)
             self.detected_contours = self.apply_smart_smoothing_if_enabled(self.detected_contours)
+            self.detected_contours = self.apply_geometry_correction_if_enabled(self.detected_contours)
             self.detected_contours = self.apply_circle_regularization_if_suitable(self.detected_contours)
             self.detected_contours = self.apply_hole_scaling(self.detected_contours)
             self.detected_contours = self.apply_bridge_tabs_if_enabled(self.detected_contours)
@@ -6131,13 +6370,14 @@ class WorkflowApp(tk.Tk):
             points = sum(len(c.points) for c in self.detected_contours if c.rule.export)
             self._update_cad_point_count()
             removed = before - len(self.detected_contours)
-            diagnostic_status = self._update_vector_diagnostics(
-                rules,
-                contours,
-                self.detected_contours,
-                centerline_mode,
-            )
+            # Die ausführliche Diagnose baut pro Farbregel zusätzliche Masken
+            # auf und war bei großen Scans ein kompletter zweiter Durchlauf.
+            # Sie ist deshalb nur noch über den Diagnose-Button verfügbar.
+            diagnostic_status = ""
+            self.vector_diagnostics_var.set("Diagnose auf Anfrage")
             final_status = f"Konturen: {len(self.detected_contours)} | Export aktiv: {exported} | Punkte: {points} | Cleanup entfernt: {removed}"
+            if cache_hit:
+                final_status += " | Erkennung aus Cache"
             if diagnostic_status:
                 final_status += f" | {diagnostic_status}"
             self.set_progress(100, final_status)
@@ -6219,6 +6459,7 @@ class WorkflowApp(tk.Tk):
         zoom = max(0.0001, float(getattr(viewer, "zoom", 1.0) or 1.0))
         offset_x = float(getattr(viewer, "offset_x", 0.0))
         offset_y = float(getattr(viewer, "offset_y", 0.0))
+        cad_join = tk.MITER if self.geometry_correction_var.get() else tk.ROUND
 
         if self.unique_cad_lines_var.get():
             for rule, a, b in vector.unique_line_segments_from_contours(
@@ -6242,7 +6483,10 @@ class WorkflowApp(tk.Tk):
                 if not item.rule.export or len(item.points) < 2:
                     continue
                 raw_pts = getattr(item, "raw_points", None)
-                if raw_pts and len(raw_pts) >= 2:
+                # Bei aktiver CAD-Korrektur ist die graue Rohkontur irreführend:
+                # Sie zeigt bewusst noch die Pixelknicke, die exportierte Linie
+                # darunter ist aber bereits korrigiert.
+                if raw_pts and len(raw_pts) >= 2 and not self.geometry_correction_var.get():
                     preview_raw = [(float(x), float(y)) for x, y in raw_pts]
                     if item.closed and len(preview_raw) >= 3:
                         preview_raw = preview_raw + [preview_raw[0]]
@@ -6264,7 +6508,7 @@ class WorkflowApp(tk.Tk):
                 coords = self._canvas_points_from_path(pts, zoom, offset_x, offset_y)
                 if len(coords) < 4:
                     continue
-                canvas.create_line(coords, fill=color, width=2, capstyle=tk.ROUND, joinstyle=tk.ROUND)
+                canvas.create_line(coords, fill=color, width=2, capstyle=tk.ROUND, joinstyle=cad_join)
 
         self.draw_vector_bbox_canvas_overlay(canvas, zoom, offset_x, offset_y)
         self.draw_anchor_points_canvas_overlay(canvas, zoom, offset_x, offset_y)
@@ -6280,8 +6524,8 @@ class WorkflowApp(tk.Tk):
             coords = self._canvas_points_from_path(pts, zoom, offset_x, offset_y)
             if len(coords) < 4:
                 continue
-            canvas.create_line(coords, fill="#ffffff", width=7, capstyle=tk.ROUND, joinstyle=tk.ROUND)
-            canvas.create_line(coords, fill="#ff0000", width=3, capstyle=tk.ROUND, joinstyle=tk.ROUND)
+            canvas.create_line(coords, fill="#ffffff", width=7, capstyle=tk.ROUND, joinstyle=cad_join)
+            canvas.create_line(coords, fill="#ff0000", width=3, capstyle=tk.ROUND, joinstyle=cad_join)
 
     def draw_anchor_points_canvas_overlay(
         self,
@@ -6491,6 +6735,70 @@ class WorkflowApp(tk.Tk):
 
         return preview
 
+    def _build_mask_fill_colors(self, contours: List[Any]) -> Dict[int, Tuple[int, int, int]]:
+        """
+        Ermittelt je Farbregel die Farbe, die an ihrer Fläche tatsächlich in der
+        Farbmaske-Vorschau sichtbar wäre (inkl. Regel-Priorität bei
+        überlappenden Farbregeln), statt blind item.rule.rgb zu übernehmen.
+        Dient dem Export-Toggle "wie Farbmaske einfärben", der 1:1 zu
+        build_filled_mask_preview_image() passen soll.
+
+        Gesampelt wird auf der tatsächlichen Rastermaske der Regel (derselben,
+        die auch die Farbmaske-Vorschau zeichnet) statt auf dem vereinfachten
+        Vektorpolygon: Bei Ring-/Donut-Formen (z. B. Buchstaben O/D/A) liegt der
+        "tiefste" Punkt der reinen Außenkontur oft genau im Loch – dort würde
+        man versehentlich die Hintergrundfarbe statt der echten Regelfarbe
+        sampeln. Die Regel-Maske selbst hat solche Löcher bereits ausgespart.
+
+        Wichtig: Der Schlüssel ist id(rule), nicht id(item). Löcher gehören zur
+        selben Regel wie ihre Außenkontur; würde man ihnen eine andere
+        Füllfarbe zuweisen, würden Außenkontur und Loch beim SVG-Export in
+        unterschiedliche (Layer, Farbe)-Gruppen fallen und der evenodd-
+        Lochausschnitt bricht (Loch verschwindet oder wird falsch gefüllt).
+        """
+        result: Dict[int, Tuple[int, int, int]] = {}
+        if self.vector_image_rgb is None:
+            return result
+        rules_in_use = {id(item.rule): item.rule for item in contours if not getattr(item, "is_hole", False)}
+        if not rules_in_use:
+            return result
+
+        mask_arr = np.array(self.build_filled_mask_preview_image())
+        h, w = mask_arr.shape[:2]
+
+        try:
+            work_image = vector.preprocess_vector_image(
+                self.vector_image_rgb,
+                enabled=self.preprocess_vector_var.get(),
+                blur_radius=self.get_preprocess_blur(),
+                edge_smoothing=self.get_preprocess_edge_smoothing(),
+            )
+            mask_edge_smoothing = self.get_preprocess_edge_smoothing() if self.preprocess_vector_var.get() else 0.0
+            mask_noise_area = self.get_preprocess_noise_area() if self.preprocess_vector_var.get() else 0.0
+        except Exception:
+            work_image = self.vector_image_rgb
+            mask_edge_smoothing = 0.0
+            mask_noise_area = 0.0
+
+        for rule_id, rule in rules_in_use.items():
+            if not rule.export:
+                continue
+            try:
+                mask = vector.make_color_mask(work_image, rule.rgb, rule.tolerance)
+                mask = vector.remove_small_components(mask, rule.min_area)
+                if mask_edge_smoothing > 0.0 or mask_noise_area > 0.0:
+                    mask = vector.calm_mask_edges(mask, mask_edge_smoothing, mask_noise_area)
+            except Exception:
+                continue
+            if not np.any(mask):
+                continue
+            # Tiefster Punkt innerhalb der echten Regel-Maske (Löcher bereits ausgespart).
+            dist = vector.cv2.distanceTransform(mask.astype(np.uint8), vector.cv2.DIST_L2, 5)
+            _, _, _, max_loc = vector.cv2.minMaxLoc(dist)
+            px, py = max_loc
+            result[rule_id] = tuple(int(v) for v in mask_arr[py, px])
+        return result
+
     def build_object_check_preview_image(self) -> Image.Image:
         """
         Farbig codierte Objektvorschau aus den aktuell vorhandenen Pfaden.
@@ -6505,7 +6813,11 @@ class WorkflowApp(tk.Tk):
             return Image.new("RGB", (1, 1), (255, 255, 255))
 
         h, w = self.vector_image_rgb.shape[:2]
+        # 2x-AA vervierfacht den Speicherbedarf. Bei großen Scans reicht eine
+        # direkte Vorschau vollkommen aus und verhindert Speicher-/UI-Spitzen.
         aa = max(1, int(getattr(self, "vector_preview_supersample", 1)))
+        if w * h > 2_000_000:
+            aa = 1
         preview_hr = Image.new("RGB", (w * aa, h * aa), (255, 255, 255))
         draw = ImageDraw.Draw(preview_hr)
         palette = [
@@ -6616,6 +6928,8 @@ class WorkflowApp(tk.Tk):
 
         h, w = self.vector_image_rgb.shape[:2]
         aa = max(1, int(getattr(self, "vector_preview_supersample", 1)))
+        if w * h > 2_000_000:
+            aa = 1
         preview_hr = Image.new("RGB", (w * aa, h * aa), (248, 250, 252))
 
         solids, holes = self._ordered_preview_contours(self.detected_contours)
@@ -7064,15 +7378,21 @@ class WorkflowApp(tk.Tk):
         h, w = self.vector_image_rgb.shape[:2]
         self.set_progress(60, tr("progress.writing_file"))
         if suffix == ".svg":
+            color_like_mask = self.export_color_like_mask_var.get()
+            # Der Toggle "wie Farbmaske einfärben" ergibt ohne Flächenfüllung
+            # keinen sichtbaren Effekt, daher erzwingt er die Füllung mit.
+            fill_closed_shapes = self.fill_closed_shapes_var.get() or color_like_mask
+            mask_fill_colors = self._build_mask_fill_colors(contours) if color_like_mask else None
             vector.export_svg(
                 out,
                 (w, h),
                 contours,
                 pixel_to_mm,
-                fill_closed_shapes=self.fill_closed_shapes_var.get(),
+                fill_closed_shapes=fill_closed_shapes,
                 use_bezier=self.use_bezier_var.get(),
                 group_connected_paths=self.group_connected_paths_var.get(),
                 force_color_layers=self.force_color_layers_var.get(),
+                mask_fill_colors=mask_fill_colors,
             )
         elif suffix == ".dxf":
             vector.export_dxf(
@@ -7134,15 +7454,19 @@ class WorkflowApp(tk.Tk):
             h, w = self.vector_image_rgb.shape[:2]
             self.set_progress(60, tr("progress.writing_file"))
             if suffix == ".svg":
+                color_like_mask = self.export_color_like_mask_var.get()
+                fill_closed_shapes = self.fill_closed_shapes_var.get() or color_like_mask
+                mask_fill_colors = self._build_mask_fill_colors(self.detected_contours) if color_like_mask else None
                 vector.export_svg(
                     out,
                     (w, h),
                     self.detected_contours,
                     pixel_to_mm,
-                    fill_closed_shapes=self.fill_closed_shapes_var.get(),
+                    fill_closed_shapes=fill_closed_shapes,
                     use_bezier=self.use_bezier_var.get(),
                     group_connected_paths=self.group_connected_paths_var.get(),
                     force_color_layers=self.force_color_layers_var.get(),
+                    mask_fill_colors=mask_fill_colors,
                 )
             elif suffix == ".dxf":
                 vector.export_dxf(

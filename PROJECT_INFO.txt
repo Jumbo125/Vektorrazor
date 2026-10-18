@@ -6,7 +6,8 @@ Start:
   python main.py
 
 Build:
-  build_windows.bat
+  powershell -ExecutionPolicy Bypass -File .\build_windows.ps1
+  ./build_linux.sh
 
 Lizenz:
   GPL-3.0

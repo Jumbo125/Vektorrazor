@@ -7,3 +7,4 @@ opencv-python>=4.8
 ezdxf>=1.1
 svgwrite>=1.4
 shapely>=2.0
+PyMuPDF>=1.24
